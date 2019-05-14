@@ -13,16 +13,24 @@ class RandomAccessMegastore extends EventEmitter {
     this.db = db
     this.networking = networking
     this.opts = opts
+
+    this._corestores = new Map()
+    this._ready = Promise.all([
+      this.networking.ready()
+    ])
   }
 
-  async get (name, coreOpts, opts = {}) {
+  ready () {
+    return this._ready
+  }
+
+  get (name, coreOpts, opts = {}) {
+    const self = this
+
     const storage = path => this.storage(name + '/' + path)
     const store = corestore(storage, { ...this.opts, coreOpts })
     const { get, replicate, close } = store
-    var encodedMainKey
-
-    // TODO: Support encrypted replication.
-    if (opts.seed !== false) this.networking.seed(store)
+    var mainKey, mainKeyString
 
     return {
       get: wrappedGet,
@@ -33,7 +41,7 @@ class RandomAccessMegastore extends EventEmitter {
     function wrappedClose (cb) {
       close(err => {
         if (err) return cb(err)
-        if (opts.seed !== false) this.networking.unseed(store)
+        if (opts.seed !== false) this.networking.unseed(mainKeyString)
       })
     }
 
@@ -46,9 +54,9 @@ class RandomAccessMegastore extends EventEmitter {
 
         const value = Core.encode({
           key: core.key,
-          seed: opts.seed,
+          seed: opts.seed !== false,
           writable: core.writable,
-          sparse: coreOpts.sparse,
+          sparse: !!coreOpts.sparse,
           valueEncoding: coreOpts.valueEncoding,
           name: coreOpts.name
         })
@@ -56,14 +64,21 @@ class RandomAccessMegastore extends EventEmitter {
         batch.push({ type: 'put', key: encodedKey, value })
         batch.push({ type: 'put', key: encodedDKey, value })
 
-        if (coreOpts.main) encodedMainKey = encodedKey
-        else batch.push({ type: 'put', key: encodedMainKey + '/' + encodedKey, value })
-        if (coreOpts.name) batch.push({ type: 'put', key: encodedMainKey + '/' + coreOpts.name, value })
+        if (coreOpts.main) {
+          mainKey = core.key
+          mainKeyString = encodedKey
+          self._corestores.set(encodedKey, store)
+          if (opts.seed !== false) self.networking.seed(core.discoveryKey, replicate)
+        } else {
+          batch.push({ type: 'put', key: mainKeyString + '/' + encodedKey, value })
+        }
+        if (coreOpts.name) batch.push({ type: 'put', key: mainKeyString + '/' + coreOpts.name, value })
 
-        this.db.batch(batch, err => {
+        self.db.batch(batch, err => {
           if (err) this.emit('error', err)
         })
       })
+      return core
     }
   }
 
@@ -84,7 +99,16 @@ class RandomAccessMegastore extends EventEmitter {
   }
 
   async close () {
-
+    return Promise.all([
+      this.networking.close(),
+      this.db.close(),
+      [...this._corestores].map((_, store) => new Promise((resolve, reject) => {
+        store.close(err => {
+          if (err) return reject(err)
+          return resolve()
+        })
+      }))
+    ])
   }
 }
 
