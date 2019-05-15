@@ -8,11 +8,12 @@ class RandomAccessMegastore extends EventEmitter {
   constructor(storage, db, networking, opts) {
     if (typeof storage !== 'function') storage = path => storage(path)
     super()
+    this.opts = opts
 
     this.storage = storage
     this.db = db
     this.networking = networking
-    this.opts = opts
+    this.networking.on('error', err => this.emit('error', err))
 
     this._corestores = new Map()
     this._ready = Promise.all([
@@ -102,7 +103,7 @@ class RandomAccessMegastore extends EventEmitter {
     return Promise.all([
       this.networking.close(),
       this.db.close(),
-      [...this._corestores].map((_, store) => new Promise((resolve, reject) => {
+      [...this._corestores].map(([, store]) => new Promise((resolve, reject) => {
         store.close(err => {
           if (err) return reject(err)
           return resolve()
