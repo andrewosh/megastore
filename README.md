@@ -1,2 +1,2 @@
-# random-access-megastore
+# megastore
 An opionated random-access-corestore factory with built-in networking.
