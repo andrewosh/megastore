@@ -1,14 +1,16 @@
 const test = require('tape')
 
 const ram = require('random-access-memory')
+const raf = require('random-access-file')
+const rimraf = require('rimraf')
 const memdb = require('memdb')
 
 const SwarmNetworker = require('megastore-swarm-networking')
 const Megastore = require('..')
 
 test('replication of two corestores', async t => {
-  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3006 }))
-  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3007 }))
+  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker())
+  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker())
   await megastore1.ready()
   await megastore2.ready()
 
@@ -48,8 +50,8 @@ test('replication of two corestores', async t => {
 })
 
 test('replication of two corestores with multiple channels', async t => {
-  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3006 }))
-  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3007 }))
+  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker())
+  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker())
   await megastore1.ready()
   await megastore2.ready()
 
@@ -91,8 +93,8 @@ test('replication of two corestores with multiple channels', async t => {
 })
 
 test('replicates across restarts', async t => {
-  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3006 }))
-  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3007 }))
+  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker())
+  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker())
   var defaultKey
 
   await megastore1.ready()
@@ -131,7 +133,7 @@ test('replicates across restarts', async t => {
       const core1 = cs1.default(defaultKey)
       core1.ready(err => {
         t.error(err, 'no error')
-        const core2 = cs2.default({ key: core1.key })
+        const core2 = cs2.default(core1.key)
         core1.ready(err => {
           t.error(err, 'no error')
           append(core1, core2)
@@ -153,7 +155,7 @@ test('replicates across restarts', async t => {
 })
 
 test('reuses hypercores across corestores', async t => {
-  const megastore = new Megastore(ram, memdb(), new SwarmNetworker({ port: 3006 }))
+  const megastore = new Megastore(ram, memdb(), new SwarmNetworker())
   await megastore.ready()
   megastore.on('error', err => t.fail(err))
 
@@ -178,6 +180,82 @@ test('reuses hypercores across corestores', async t => {
   t.end()
 })
 
+test('replicates with a reopened megastore', async t => {
+  var megastore1, megastore2
+  const db1 = memdb()
+
+  megastore2 = new Megastore(path => raf('storage2' + '/' + path), memdb(), new SwarmNetworker())
+  await megastore2.ready()
+  megastore2.on('error', err => t.fail(err))
+
+  const { first, second } = await populateAndClose()
+  await reopenAndSync(first, second)
+
+  await megastore1.close()
+  await megastore2.close()
+
+  await cleanup(['storage1', 'storage2'])
+
+  t.end()
+
+  async function populateAndClose () {
+    megastore1 = new Megastore(path => raf('storage1' + '/' + path), db1, new SwarmNetworker())
+    await megastore1.ready()
+    megastore1.on('error', err => t.fail(err))
+
+    const cs1 = megastore1.get('cs1')
+    const core1 = cs1.default()
+    const core2 = cs1.get()
+    var first, second
+    await new Promise((resolve, reject) => {
+      core2.ready(err => {
+        if (err) return reject(err)
+        first = core1.key
+        second = core2.key
+        return resolve()
+      })
+    })
+    await new Promise((resolve, reject) => {
+      core2.append('hello', err => {
+        if (err) return reject(err)
+        return resolve()
+      })
+    })
+    await megastore1.close()
+    return { first, second }
+  }
+
+  async function reopenAndSync (first, second) {
+    megastore1 = new Megastore(path => raf('storage1' + '/' + path), db1, new SwarmNetworker())
+    await megastore1.ready()
+    megastore1.on('error', err => t.fail(err))
+
+    const cs2 = megastore2.get('cs2')
+    const core1 = cs2.default({ key: first })
+    const core2 = cs2.get({ key: second })
+
+    return new Promise((resolve, reject) => {
+      core2.ready(err => {
+        if (err) return reject(err)
+        core2.get(0, (err, contents) => {
+          if (err) return reject(err)
+          t.same(contents, Buffer.from('hello'))
+          return resolve()
+        })
+      })
+    })
+  }
+})
+
 test('does not replicate a corestore that\'s not seeded')
 test('unseeds a replicating corestore')
 test('lists all corestores')
+
+async function cleanup (dirs) {
+  return Promise.all(dirs.map(dir => new Promise((resolve, reject) => {
+    rimraf(dir, err => {
+      if (err) return reject(err)
+      return resolve()
+    })
+  })))
+}

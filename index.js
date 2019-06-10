@@ -16,41 +16,89 @@ class Megastore extends EventEmitter {
     this.storage = storage
     this.db = db
     this.networking = networking
-    if (this.networking) this.networking.on('error', err => this.emit('error', err))
 
-    this._coreIndex = sub(this.db, 'cores')
-    this._keyIndex = sub(this.db, 'keys')
+    if (this.networking) {
+      this.networking.on('error', err => this.emit('error', err))
+      this.networking.setReplicatorFactory(async dkey => {
+        var store = this._corestoresByDKey.get(dkey)
+        if (store) return store.replicate
+        console.log('THERE IS NO CORESTORE CACHED')
+        try {
+          console.log('dkey:', dkey)
+          const { name, key, opts } = await this._storeIndex.get('corestore/' + dkey)
+          console.log('opts:', opts)
+          if (opts.seed === false) return null
+          console.log('NAME:', name, 'KEY:', key, 'OPTS:', opts)
+
+          store = this.get(name)
+          // Inflating the default hypercore here will set the default key and bootstrap replication.
+          store.default(datEncoding.decode(key))
+
+          return store.replicate
+        } catch (err) {
+          if (!err.notFound) throw err
+          return null
+        }
+      })
+    }
+
+    this._storeIndex = sub(this.db, 'stores', { valueEncoding: 'json' })
+    this._keyIndex = sub(this.db, 'keys', { valueEncoding: 'json' })
 
     // The megastore duplicates storage across corestore instances. This top-level cache allows us to
     // reuse in-memory hypercores.
     this._cores = new Map()
+    this._corestores = new Map()
+    this._corestoresByDKey = new Map()
     // Default feed keys are cached here so that they can be fetched synchronously. Created in _loadKeys.
     this._keys = null
 
-    this._corestores = new Map()
-    this._ready = Promise.all([
-      this._loadKeys(),
-      this.networking ? this.networking.ready() : Promise.resolve()
-    ])
+    this.isReady = false
+    this._ready = async () => {
+      await this._loadKeys()
+      await this.networking ? this._reseed() : Promise.resolve()
+    }
   }
 
   _loadKeys () {
     return new Promise((resolve, reject) => {
       collect(this._keyIndex.createReadStream(), (err, list) => {
         if (err) return reject(err)
-        this._keys = new Map(list)
+        const mapList = list.map(({ key, value }) => [key, {
+          publicKey: Buffer.from(value.publicKey, 'hex'),
+          secretKey: Buffer.from(value.secretKey, 'hex')
+        }])
+        this._keys = new Map(mapList)
         return resolve()
       })
     })
   }
 
-  ready () {
-    return this._ready
+  _reseed () {
+    return new Promise(async resolve => {
+      const stream = this._storeIndex.createReadStream({
+        gt: 'corestore/',
+        lt: 'corestore/' + String.fromCharCode(65535)
+      })
+      stream.on('data', ({ key, value }) => {
+        key = key.slice(10)
+        const store = this.get(value.name, value.opts)
+        this.networking.seed(datEncoding.decode(key))
+      })
+      stream.on('end', resolve)
+      stream.on('error', err => reject(err))
+    })
+  }
+
+  async ready () {
+    if (this.isReady) return
+    await this._ready()
+    this.isReady = true
   }
 
   get (name, opts = {}) {
     const self = this
-    var mainDiscoveryKey, mainKeyString
+    var mainDiscoveryKeyString, mainKeyString
 
     const store = corestore(this.storage, { ...this.opts, ...opts })
     const {
@@ -94,26 +142,31 @@ class Megastore extends EventEmitter {
         valueEncoding: coreOpts.valueEncoding
       })
 
-      batch.push({ type: 'put', key: encodedKey, value })
-      batch.push({ type: 'put', key: encodedDiscoveryKey, value })
+      batch.push({ type: 'put', key: 'core/' + encodedDiscoveryKey, value })
       self._cores.set(encodedKey, { core, refs: [name] })
 
       if (coreOpts.default) {
-        mainDiscoveryKey = encodedDiscoveryKey
+        if (opts.seed !== false && self.networking) self.networking.seed(core.discoveryKey)
+
+        mainDiscoveryKeyString = encodedDiscoveryKey
         mainKeyString = encodedKey
+
         self._corestores.set(mainKeyString, store)
-        if (opts.seed !== false && self.networking) self.networking.seed(core.discoveryKey, innerReplicate)
+        self._corestoresByDKey.set(mainDiscoveryKeyString, store)
+        batch.push({ type: 'put', key: 'corestore/' + encodedDiscoveryKey, value: { name, opts, key: encodedKey } })
       } else {
-        batch.push({ type: 'put', key: mainKeyString + '/' + encodedKey, value })
+        batch.push({ type: 'put', key: 'subcore/' +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
 
-      self._coreIndex.batch(batch, err => {
+      self._storeIndex.batch(batch, err => {
         if (err) this.emit('error', err)
       })
     }
 
     function close (cb) {
-      if (opts.seed !== false && mainDiscoveryKey && self.networking) self.networking.unseed(mainDiscoveryKey)
+      if (self.networking && opts.seed !== false && mainDiscoveryKeyString) {
+        self.networking.unseed(mainDiscoveryKeyString)
+      }
 
       const cores = innerList()
       var pending = 0
@@ -140,26 +193,30 @@ class Megastore extends EventEmitter {
 
       function onclosed () {
         self._corestores.delete(mainKeyString)
+        self._corestoresByDKey.delete(mainDiscoveryKeyString)
         return cb(null)
       }
     }
 
     function wrappedDefault (coreOpts) {
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
+      const key = coreOpts && coreOpts.key
 
-      if (!coreOpts || !coreOpts.key) {
-        const keyPair = crypto.keyPair()
+      if (!key) {
+        var keyPair = crypto.keyPair()
         var { publicKey, secretKey } = keyPair
         self._keys.set(name, keyPair)
-        self._keyIndex.put(name, secretKey, err => {
+        self._keyIndex.put(name, {
+          secretKey: keyPair.secretKey.toString('hex'),
+          publicKey: keyPair.publicKey.toString('hex')
+        }, err => {
           if (err) return self.emit('error', err)
         })
-        coreOpts = { key: publicKey }
       } else {
-        const storedKey = self._keys.get(name)
-        if (storedKey) secretKey = storedKey.secretKey
+        keyPair = self._keys.get(name)
+        if (keyPair) secretKey = keyPair.secretKey
       }
-      coreOpts = { ...coreOpts, secretKey, default: true }
+      coreOpts = { ...coreOpts, secretKey, keyPair, default: true }
       return getCore(innerGetDefault, coreOpts)
     }
 
@@ -188,7 +245,6 @@ class Megastore extends EventEmitter {
   async close () {
     return Promise.all([
       this.networking ? this.networking.close() : Promise.resolve(),
-      this.db.close(),
       [...this._corestores].map(([, store]) => new Promise((resolve, reject) => {
         store.close(err => {
           if (err) return reject(err)
