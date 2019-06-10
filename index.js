@@ -22,13 +22,9 @@ class Megastore extends EventEmitter {
       this.networking.setReplicatorFactory(async dkey => {
         var store = this._corestoresByDKey.get(dkey)
         if (store) return store.replicate
-        console.log('THERE IS NO CORESTORE CACHED')
         try {
-          console.log('dkey:', dkey)
           const { name, key, opts } = await this._storeIndex.get('corestore/' + dkey)
-          console.log('opts:', opts)
           if (opts.seed === false) return null
-          console.log('NAME:', name, 'KEY:', key, 'OPTS:', opts)
 
           store = this.get(name)
           // Inflating the default hypercore here will set the default key and bootstrap replication.
