@@ -337,6 +337,110 @@ test('seeds a previously-unseeded corestore', async t => {
   t.end()
 })
 
+test('seeds a previously-unseeded corestore by name', async t => {
+  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker())
+  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker())
+  await megastore1.ready()
+  await megastore2.ready()
+
+  megastore1.on('error', err => t.fail(err))
+  megastore2.on('error', err => t.fail(err))
+
+  const cs1 = megastore1.get('cs1', { seed: false})
+  const cs2 = megastore2.get('cs2')
+
+  await new Promise(resolve => {
+    const core1 = cs1.default()
+    core1.ready(err => {
+      t.error(err, 'no error')
+      const core2 = cs2.default({ key: core1.key })
+      core2.ready(err => {
+        t.error(err, 'no error')
+        append(core1, core2)
+      })
+    })
+
+    function append (core1, core2) {
+      core1.append('hello', err => {
+        t.error(err, 'no error')
+        t.same(core2.length, 0)
+        megastore1.seed('cs1')
+          .then(() => {
+            setTimeout(() => {
+              core2.get(0, (err, contents) => {
+                t.error(err, 'no error')
+                t.same(contents, Buffer.from('hello'))
+                return resolve()
+              })
+            }, 250)
+          })
+          .catch(err => {
+            t.fail(err)
+          })
+      })
+    }
+  })
+
+  await megastore1.close()
+  await megastore2.close()
+
+  t.end()
+})
+
+test('unseeds a previously-seeded corestore', async t => {
+  const megastore1 = new Megastore(ram, memdb(), new SwarmNetworker())
+  const megastore2 = new Megastore(ram, memdb(), new SwarmNetworker())
+  await megastore1.ready()
+  await megastore2.ready()
+
+  megastore1.on('error', err => t.fail(err))
+  megastore2.on('error', err => t.fail(err))
+
+  const cs1 = megastore1.get('cs1')
+  const cs2 = megastore2.get('cs2')
+
+  await new Promise(resolve => {
+    const core1 = cs1.default()
+    core1.ready(err => {
+      t.error(err, 'no error')
+      const core2 = cs2.default({ key: core1.key })
+      core2.ready(err => {
+        t.error(err, 'no error')
+        append(core1, core2)
+      })
+    })
+
+    function append (core1, core2) {
+      core1.append('hello', err => {
+        t.error(err, 'no error')
+        t.same(core2.length, 0)
+        core2.get(0, (err, contents) => {
+          t.error(err, 'no error')
+          t.same(contents, Buffer.from('hello'))
+          megastore1.unseed(core1.discoveryKey)
+            .then(() => onunseed(core1, core2))
+            .catch(err => t.fail(err))
+        })
+      })
+    }
+
+    function onunseed (core1, core2) {
+      core1.append('goodbye', err => {
+        t.error(err, 'no error')
+        setTimeout(() => {
+          t.same(core2.length, 1)
+          return resolve()
+        }, 250)
+      })
+    }
+  })
+
+  await megastore1.close()
+  await megastore2.close()
+
+  t.end()
+})
+
 test('lists all corestores')
 
 async function cleanup (dirs) {

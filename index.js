@@ -167,8 +167,10 @@ class Megastore extends EventEmitter {
         self._corestores.set(mainKeyString, store)
         self._corestoresByDKey.set(mainDiscoveryKeyString, store)
 
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: { name, opts, key: encodedKey } })
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: { name, opts, key: encodedKey } })
+        const record = { name, opts, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
@@ -245,28 +247,40 @@ class Megastore extends EventEmitter {
 
   }
 
-  async seed (dkey) {
-    if (dkey instanceof Buffer) dkey = datEncoding.encode(dkey)
-    if (!this.networking || this.isSeeding(dkey)) return
+  async seed (idx) {
+    if (idx instanceof Buffer) idx = datEncoding.encode(idx)
 
-    const record = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
+    const dkey = datEncoding.decode(record.discoveryKey)
+
+    if (!this.networking || this.isSeeding(record.discoveryKey)) return
     record.opts.seed = true
-    await this._storeIndex.put(CORESTORE_PREFIX + dkey, record)
 
-    this._seeding.add(dkey)
-    this.networking.seed(datEncoding.decode(dkey))
+    await this._storeIndex.batch([
+      { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
+      { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
+    ])
+
+    this._seeding.add(record.discoveryKey)
+    this.networking.seed(dkey)
   }
 
-  async unseed (dkey) {
-    if (dkey instanceof Buffer) dkey = datEncoding.encode(dkey)
-    if (!this.networking || !this.isSeeding(dkey)) return
+  async unseed (idx) {
+    if (idx instanceof Buffer) idx = datEncoding.encode(idx)
 
-    const record = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
+    const dkey = datEncoding.decode(record.discoveryKey)
+
+    if (!this.networking || !this.isSeeding(record.discoveryKey)) return
     record.opts.seed = false
-    await this._storeIndex.put(CORESTORE_PREFIX + dkey, record)
 
-    this._seeding.remove(dkey)
-    this.networking.unseed(datEncoding.decode(dkey))
+    await this._storeIndex.batch([
+      { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
+      { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
+    ])
+
+    this._seeding.delete(record.discoveryKey)
+    this.networking.unseed(dkey)
   }
 
   async delete (opts) {
