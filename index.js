@@ -7,6 +7,10 @@ const collect = require('stream-collector')
 
 const { Core } = require('./lib/messages')
 
+const CORESTORE_PREFIX = 'corestore/'
+const SUBCORE_PREFIX = 'subcore/'
+const CORE_PREFIX = 'core/'
+
 class Megastore extends EventEmitter {
   constructor (storage, db, networking, opts) {
     if (typeof storage !== 'function') storage = path => storage(path)
@@ -20,13 +24,11 @@ class Megastore extends EventEmitter {
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
-        var store = this._corestoresByDKey.get(dkey)
-        if (store) return store.replicate
         try {
-          const { name, key, opts } = await this._storeIndex.get('corestore/' + dkey)
-          if (opts.seed === false) return null
+          const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
+          if (!this.isSeeding(dkey) || coreOpts.seed === false) return null
 
-          store = this.get(name)
+          const store = this._corestoresByDKey.get(dkey) || this.get(name)
           // Inflating the default hypercore here will set the default key and bootstrap replication.
           store.default(datEncoding.decode(key))
 
@@ -46,13 +48,16 @@ class Megastore extends EventEmitter {
     this._cores = new Map()
     this._corestores = new Map()
     this._corestoresByDKey = new Map()
+
+    // The set of seeded discovery keys. Created in _reseed.
+    this._seeding = new Set()
     // Default feed keys are cached here so that they can be fetched synchronously. Created in _loadKeys.
     this._keys = null
 
     this.isReady = false
     this._ready = async () => {
       await this._loadKeys()
-      await this.networking ? this._reseed() : Promise.resolve()
+      await (this.networking ? this._reseed() : Promise.resolve())
     }
   }
 
@@ -73,13 +78,19 @@ class Megastore extends EventEmitter {
   _reseed () {
     return new Promise(async resolve => {
       const stream = this._storeIndex.createReadStream({
-        gt: 'corestore/',
-        lt: 'corestore/' + String.fromCharCode(65535)
+        gt: CORESTORE_PREFIX,
+        lt: CORESTORE_PREFIX + String.fromCharCode(65535)
       })
       stream.on('data', ({ key, value }) => {
+        if (value.seed === false) return
         key = key.slice(10)
-        const store = this.get(value.name, value.opts)
-        this.networking.seed(datEncoding.decode(key))
+        try {
+          var decodedKey = datEncoding.decode(key)
+        } catch (err) {
+          return
+        }
+        this._seeding.add(key)
+        this.networking.seed(decodedKey)
       })
       stream.on('end', resolve)
       stream.on('error', err => reject(err))
@@ -90,6 +101,10 @@ class Megastore extends EventEmitter {
     if (this.isReady) return
     await this._ready()
     this.isReady = true
+  }
+
+  isSeeding (dkey) {
+    return this._seeding.has(dkey)
   }
 
   get (name, opts = {}) {
@@ -130,28 +145,32 @@ class Megastore extends EventEmitter {
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
 
-      const value = Core.encode({
+      const value = {
         key: core.key,
         seed: opts.seed !== false,
         writable: core.writable,
-        sparse: !!coreOpts.sparse,
-        valueEncoding: coreOpts.valueEncoding
-      })
+      }
 
-      batch.push({ type: 'put', key: 'core/' + encodedDiscoveryKey, value })
+      batch.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value })
       self._cores.set(encodedKey, { core, refs: [name] })
 
       if (coreOpts.default) {
-        if (opts.seed !== false && self.networking) self.networking.seed(core.discoveryKey)
-
         mainDiscoveryKeyString = encodedDiscoveryKey
         mainKeyString = encodedKey
 
+        if (self.networking && opts.seed !== false) {
+          self.networking.seed(core.discoveryKey)
+          self._seeding.add(mainDiscoveryKeyString)
+        }
+
+        self._corestores.set(name, store)
         self._corestores.set(mainKeyString, store)
         self._corestoresByDKey.set(mainDiscoveryKeyString, store)
-        batch.push({ type: 'put', key: 'corestore/' + encodedDiscoveryKey, value: { name, opts, key: encodedKey } })
+
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: { name, opts, key: encodedKey } })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: { name, opts, key: encodedKey } })
       } else {
-        batch.push({ type: 'put', key: 'subcore/' +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+        batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
 
       self._storeIndex.batch(batch, err => {
@@ -160,7 +179,7 @@ class Megastore extends EventEmitter {
     }
 
     function close (cb) {
-      if (self.networking && opts.seed !== false && mainDiscoveryKeyString) {
+      if (self.networking && mainDiscoveryKeyString && self.isSeeding(mainDiscoveryKeyString)) {
         self.networking.unseed(mainDiscoveryKeyString)
       }
 
@@ -226,8 +245,28 @@ class Megastore extends EventEmitter {
 
   }
 
-  async update (opts) {
+  async seed (dkey) {
+    if (dkey instanceof Buffer) dkey = datEncoding.encode(dkey)
+    if (!this.networking || this.isSeeding(dkey)) return
 
+    const record = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    record.opts.seed = true
+    await this._storeIndex.put(CORESTORE_PREFIX + dkey, record)
+
+    this._seeding.add(dkey)
+    this.networking.seed(datEncoding.decode(dkey))
+  }
+
+  async unseed (dkey) {
+    if (dkey instanceof Buffer) dkey = datEncoding.encode(dkey)
+    if (!this.networking || !this.isSeeding(dkey)) return
+
+    const record = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    record.opts.seed = false
+    await this._storeIndex.put(CORESTORE_PREFIX + dkey, record)
+
+    this._seeding.remove(dkey)
+    this.networking.unseed(datEncoding.decode(dkey))
   }
 
   async delete (opts) {
