@@ -29,6 +29,7 @@ class Megastore extends EventEmitter {
           if (coreOpts.seed === false) return null
 
           console.error('ACTUALLY REPLICATING')
+          console.error('IS IT CACHED?', !!this._corestoresByDKey.get(dkey))
 
           const store = this._corestoresByDKey.get(dkey) || this.get(name)
           // Inflating the default hypercore here will set the default key and bootstrap replication.
@@ -178,7 +179,7 @@ class Megastore extends EventEmitter {
         self._corestores.set(mainKeyString, wrappedStore)
         self._corestoresByDKey.set(mainDiscoveryKeyString, wrappedStore)
 
-        const record = { name, opts, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+        const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
         batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
         batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
