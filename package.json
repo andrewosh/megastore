@@ -21,6 +21,7 @@
     "random-access-memory": "^3.1.1",
     "random-access-file": "^2.1.1",
     "megastore-swarm-networking": "^1.0.0",
+    "hyperdrive": "git+https://github.com/mafintosh/hyperdrive#v10-mounts",
     "standard": "^12.0.1",
     "tape": "^4.10.1"
   },
