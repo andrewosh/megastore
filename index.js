@@ -19,14 +19,19 @@ class Megastore extends EventEmitter {
     this.db = db
     this.networking = networking
 
+    this._id = Date.now()
+
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
+        const existing = this._corestoresByDKey.get(dkey)
+        if (existing) return existing.replicate.bind(existing)
         try {
           const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
           if (coreOpts.seed === false) return null
 
           const store = this._corestoresByDKey.get(dkey) || this.get(name)
+
           // Inflating the default hypercore here will set the default key and bootstrap replication.
           store.default(datEncoding.decode(key))
 
@@ -167,7 +172,7 @@ class Megastore extends EventEmitter {
         self._corestores.set(mainKeyString, wrappedStore)
         self._corestoresByDKey.set(mainDiscoveryKeyString, wrappedStore)
 
-        const record = { name, opts, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+        const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
         batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
         batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
@@ -249,6 +254,7 @@ class Megastore extends EventEmitter {
 
   async seed (idx) {
     if (idx instanceof Buffer) idx = datEncoding.encode(idx)
+
     const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
     const dkey = datEncoding.decode(record.discoveryKey)
 
