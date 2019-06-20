@@ -5,8 +5,6 @@ const crypto = require('hypercore-crypto')
 const corestore = require('random-access-corestore')
 const collect = require('stream-collector')
 
-const { Core } = require('./lib/messages')
-
 const CORESTORE_PREFIX = 'corestore/'
 const SUBCORE_PREFIX = 'subcore/'
 const CORE_PREFIX = 'core/'
