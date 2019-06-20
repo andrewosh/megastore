@@ -19,11 +19,16 @@ class Megastore extends EventEmitter {
     this.db = db
     this.networking = networking
 
+    this._id = Date.now()
+
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
+        console.error(this._id, 'ATTEMPING TO REPLICATE:', dkey)
+        const existing = this._corestoresByDKey.get(dkey)
+        console.log('EXISTING?', !!existing)
+        if (existing) return existing.replicate.bind(existing)
         try {
-          console.error('ATTEMPTING TO GET REPLICATOR FOR:', dkey)
           const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
           console.error('NAME:', name, 'KEY:', key, 'opts:', coreOpts)
           if (coreOpts.seed === false) return null
@@ -32,14 +37,16 @@ class Megastore extends EventEmitter {
           console.error('IS IT CACHED?', !!this._corestoresByDKey.get(dkey))
 
           const store = this._corestoresByDKey.get(dkey) || this.get(name)
+
           // Inflating the default hypercore here will set the default key and bootstrap replication.
           store.default(datEncoding.decode(key))
 
           console.error('GOT A STORE')
 
-          return store.replicate
+          return store.replicate.bind(store)
         } catch (err) {
           if (!err.notFound) throw err
+          console.log('REPLICATOR NOT FOUND')
           return null
         }
       })
@@ -170,7 +177,6 @@ class Megastore extends EventEmitter {
         mainKeyString = encodedKey
 
         if (self.networking && opts.seed !== false) {
-          console.error('SEEDING CORE WITH KEY:', mainDiscoveryKeyString)
           self.networking.seed(core.discoveryKey)
           self._seeding.add(mainDiscoveryKeyString)
         }
@@ -193,9 +199,7 @@ class Megastore extends EventEmitter {
     }
 
     function close (cb) {
-      console.log('IN CLOSE HERE')
       if (self.networking && mainDiscoveryKeyString && self.isSeeding(mainDiscoveryKeyString)) {
-        console.log('UNSEEDING:', mainDiscoveryKeyString)
         self.networking.unseed(mainDiscoveryKeyString)
       }
 
@@ -271,8 +275,6 @@ class Megastore extends EventEmitter {
 
     if (!this.networking || this.isSeeding(record.discoveryKey)) return
     record.opts.seed = true
-
-    console.error('ACTUALLY SEEDING')
 
     await this._storeIndex.batch([
       { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
