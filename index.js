@@ -23,12 +23,18 @@ class Megastore extends EventEmitter {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
         try {
+          console.error('ATTEMPTING TO GET REPLICATOR FOR:', dkey)
           const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
-          if (!this.isSeeding(dkey) || coreOpts.seed === false) return null
+          console.error('NAME:', name, 'KEY:', key, 'opts:', coreOpts)
+          if (coreOpts.seed === false) return null
+
+          console.error('ACTUALLY REPLICATING')
 
           const store = this._corestoresByDKey.get(dkey) || this.get(name)
           // Inflating the default hypercore here will set the default key and bootstrap replication.
           store.default(datEncoding.decode(key))
+
+          console.error('GOT A STORE')
 
           return store.replicate
         } catch (err) {
@@ -87,6 +93,7 @@ class Megastore extends EventEmitter {
         } catch (err) {
           return
         }
+        console.error('RESEEDING KEY ON RESTART:', key)
         this._seeding.add(key)
         this.networking.seed(decodedKey)
       })
@@ -109,6 +116,7 @@ class Megastore extends EventEmitter {
     const self = this
     var mainDiscoveryKeyString, mainKeyString
 
+    console.error('GETTING CORESTORE WITH OPTS:', opts)
     const store = corestore(this.storage, { ...this.opts, ...opts })
     const {
       get: innerGet,
@@ -117,13 +125,15 @@ class Megastore extends EventEmitter {
       list: innerList
     } = store
 
-    return {
+    const wrappedStore = {
       default: wrappedDefault,
       get: wrappedGet,
       replicate: innerReplicate,
       list: innerList,
       close
     }
+
+    return wrappedStore
 
     function getCore (getter, coreOpts) {
       if (coreOpts && coreOpts.key) {
@@ -143,6 +153,8 @@ class Megastore extends EventEmitter {
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
 
+      console.error('PROCESSING CORE WITH OPTS:', opts, 'COREOPTS:', coreOpts)
+
       const value = {
         key: core.key,
         seed: opts.seed !== false,
@@ -157,13 +169,14 @@ class Megastore extends EventEmitter {
         mainKeyString = encodedKey
 
         if (self.networking && opts.seed !== false) {
+          console.error('SEEDING CORE WITH KEY:', mainDiscoveryKeyString)
           self.networking.seed(core.discoveryKey)
           self._seeding.add(mainDiscoveryKeyString)
         }
 
-        self._corestores.set(name, store)
-        self._corestores.set(mainKeyString, store)
-        self._corestoresByDKey.set(mainDiscoveryKeyString, store)
+        self._corestores.set(name, wrappedStore)
+        self._corestores.set(mainKeyString, wrappedStore)
+        self._corestoresByDKey.set(mainDiscoveryKeyString, wrappedStore)
 
         const record = { name, opts, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
@@ -179,7 +192,9 @@ class Megastore extends EventEmitter {
     }
 
     function close (cb) {
+      console.log('IN CLOSE HERE')
       if (self.networking && mainDiscoveryKeyString && self.isSeeding(mainDiscoveryKeyString)) {
+        console.log('UNSEEDING:', mainDiscoveryKeyString)
         self.networking.unseed(mainDiscoveryKeyString)
       }
 
@@ -247,12 +262,16 @@ class Megastore extends EventEmitter {
 
   async seed (idx) {
     if (idx instanceof Buffer) idx = datEncoding.encode(idx)
+    console.error('MEGASTORE SEEDING IDX:', idx)
 
     const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
     const dkey = datEncoding.decode(record.discoveryKey)
+    console.error('RECORD:', record, 'DKEY:', dkey)
 
     if (!this.networking || this.isSeeding(record.discoveryKey)) return
     record.opts.seed = true
+
+    console.error('ACTUALLY SEEDING')
 
     await this._storeIndex.batch([
       { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
