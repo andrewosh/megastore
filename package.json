@@ -1,6 +1,6 @@
 {
   "name": "megastore",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "An opinionated random-access-corestore factory with built-in networking.",
   "main": "index.js",
   "directories": {
