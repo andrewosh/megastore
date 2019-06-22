@@ -25,7 +25,7 @@ class Megastore extends EventEmitter {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
         const existing = this._corestoresByDKey.get(dkey)
-        if (existing) return existing.replicate.bind(existing)
+        if (existing) return existing.replicate
         try {
           const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
           if (coreOpts.seed === false) return null
