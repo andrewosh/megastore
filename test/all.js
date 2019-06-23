@@ -683,6 +683,69 @@ test('inner corestore is replicated with the discoverable flag', async t => {
   }
 })
 
+test('inner corestore is replicated with the discoverable flag across restarts', async t => {
+  const db1 = memdb()
+  var megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
+  const megastore2 = new Megastore(path => raf('m2/' + path), memdb(), createNetworker())
+  await megastore1.ready()
+  await megastore2.ready()
+
+  megastore1.on('error', err => t.fail(err))
+  megastore2.on('error', err => t.fail(err))
+
+  const firstCores = await createFirst()
+  const secondCores = await createSecondAndRefresh(firstCores)
+  await verify(secondCores)
+
+  await megastore1.close()
+  await megastore2.close()
+
+  await cleanup(['m1', 'm2'])
+
+  t.end()
+
+  function createFirst () {
+    const cs1 = megastore1.get('cs1')
+    const cs2 = megastore1.get('cs2')
+    const core1 = cs1.default()
+    const core2 = cs2.default()
+    const core3 = cs2.get({ discoverable: true })
+    return new Promise(resolve => {
+      core1.append('hello', err => {
+        t.error(err, 'no error')
+        core3.append('goodbye', err => {
+          t.error(err, 'no error')
+          return resolve([core1, core3])
+        })
+      })
+    })
+  }
+
+  async function createSecondAndRefresh([c1, c2]) {
+    var cs1 = megastore2.get('cs1')
+    var core1 = cs1.default()
+    var core2 = cs1.get({ key: c2.key, discoverable: true })
+
+    await megastore1.close()
+    megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
+    await megastore1.ready()
+
+    return [core1, core2]
+  }
+
+  async function verify ([core1, core2]) {
+    return new Promise(resolve => {
+      core2.ready(err => {
+        t.error(err, 'no error')
+        setTimeout(() => {
+          t.same(core2.remoteLength, 1)
+          return resolve()
+        }, 200)
+      })
+    })
+  }
+})
+
 test('lists all corestores')
 
 async function cleanup (dirs) {

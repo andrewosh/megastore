@@ -6,6 +6,7 @@ const corestore = require('random-access-corestore')
 const collect = require('stream-collector')
 
 const CORESTORE_PREFIX = 'corestore/'
+const DISCOVERABLE_PREFIX = 'discoverable/'
 const SUBCORE_PREFIX = 'subcore/'
 const CORE_PREFIX = 'core/'
 
@@ -64,40 +65,67 @@ class Megastore extends EventEmitter {
     }
   }
 
-  _loadKeys () {
+  _collect(index, prefix) {
     return new Promise((resolve, reject) => {
-      collect(this._keyIndex.createReadStream(), (err, list) => {
+      if (prefix) var opts = {
+        gt: prefix,
+        lt: prefix + String.fromCharCode(65535)
+      }
+      collect(index.createReadStream(opts), (err, list) => {
         if (err) return reject(err)
-        const mapList = list.map(({ key, value }) => [key, {
-          publicKey: Buffer.from(value.publicKey, 'hex'),
-          secretKey: Buffer.from(value.secretKey, 'hex')
-        }])
-        this._keys = new Map(mapList)
-        return resolve()
+        return resolve(list)
       })
     })
   }
 
-  _reseed () {
-    return new Promise(async resolve => {
-      const stream = this._storeIndex.createReadStream({
-        gt: CORESTORE_PREFIX,
-        lt: CORESTORE_PREFIX + String.fromCharCode(65535)
+  async _loadKeys () {
+    const keyList = await this._collect(this._keyIndex)
+    this._keys = new Map()
+    for (const { key, value } of keyList) {
+      this._keys.set(key, {
+        publicKey: Buffer.from(value.publicKey, 'hex'),
+        secretKey: Buffer.from(value.secretKey, 'hex')
       })
-      stream.on('data', ({ key, value }) => {
-        if (value.seed === false) return
-        key = key.slice(10)
-        try {
-          var decodedKey = datEncoding.decode(key)
-        } catch (err) {
-          return
-        }
-        this._seeding.add(key)
-        this.networking.seed(decodedKey)
-      })
-      stream.on('end', resolve)
-      stream.on('error', err => reject(err))
-    })
+    }
+  }
+
+  _seed (dkey) {
+    this._seeding.add(dkey)
+    this.networking.seed(datEncoding.decode(dkey))
+  }
+
+  _unseed (dkey) {
+    this._seeding.delete(dkey)
+    this.networking.unseed(datEncoding.decode(dkey))
+  }
+
+  async _seedDiscoverableSubfeeds (dkey) {
+    const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
+    for (const { key, value } of feedList) {
+      this._seed(key.split('/')[2])
+    }
+  }
+
+  async _unseedDiscoverableSubfeeds (dkey) {
+    const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
+    for (const { key, value } of feedList) {
+      this._unseed(key.split('/')[2])
+    }
+  }
+
+  async _reseed () {
+    const storeList = await this._collect(this._storeIndex, CORESTORE_PREFIX)
+    for (let { key, value } of storeList) {
+      if (value.seed === false) continue
+      key = key.slice(10)
+      try {
+        this._seed(key)
+      } catch (err) {
+        // If it could not be seeded, then it was indexed by name
+        continue
+      }
+      await this._seedDiscoverableSubfeeds(key)
+    }
   }
 
   async ready () {
@@ -160,26 +188,30 @@ class Megastore extends EventEmitter {
       self._cores.set(encodedKey, { core, refs: [name] })
 
       if (coreOpts.default || coreOpts.discoverable) {
+        const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
+
+        self._corestores.set(encodedKey, wrappedStore)
+        self._corestoresByDKey.set(encodedDiscoveryKey, wrappedStore)
+
         if (coreOpts.default) {
           mainDiscoveryKeyString = encodedDiscoveryKey
           mainKeyString = encodedKey
           self._corestores.set(name, wrappedStore)
+        } else {
+          batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
         }
-        self._corestores.set(encodedKey, wrappedStore)
-        self._corestoresByDKey.set(encodedDiscoveryKey, wrappedStore)
 
         if (self.networking && opts.seed !== false) {
           self.networking.seed(core.discoveryKey)
           self._seeding.add(mainDiscoveryKeyString)
         }
 
-        const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
-
 
       self._storeIndex.batch(batch, err => {
         if (err) this.emit('error', err)
@@ -269,6 +301,8 @@ class Megastore extends EventEmitter {
 
     this._seeding.add(record.discoveryKey)
     this.networking.seed(dkey)
+
+    await this._seedDiscoverableSubfeeds(record.discoveryKey)
   }
 
   async unseed (idx) {
@@ -287,6 +321,8 @@ class Megastore extends EventEmitter {
 
     this._seeding.delete(record.discoveryKey)
     this.networking.unseed(dkey)
+
+    await this._unseedDiscoverableSubfeeds(record.discoveryKey)
   }
 
   async delete (opts) {
