@@ -159,26 +159,27 @@ class Megastore extends EventEmitter {
       batch.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value })
       self._cores.set(encodedKey, { core, refs: [name] })
 
-      if (coreOpts.default) {
-        mainDiscoveryKeyString = encodedDiscoveryKey
-        mainKeyString = encodedKey
+      if (coreOpts.default || coreOpts.discoverable) {
+        if (coreOpts.default) {
+          mainDiscoveryKeyString = encodedDiscoveryKey
+          mainKeyString = encodedKey
+          self._corestores.set(name, wrappedStore)
+        }
+        self._corestores.set(encodedKey, wrappedStore)
+        self._corestoresByDKey.set(encodedDiscoveryKey, wrappedStore)
 
         if (self.networking && opts.seed !== false) {
           self.networking.seed(core.discoveryKey)
           self._seeding.add(mainDiscoveryKeyString)
         }
 
-        self._corestores.set(name, wrappedStore)
-        self._corestores.set(mainKeyString, wrappedStore)
-        self._corestoresByDKey.set(mainDiscoveryKeyString, wrappedStore)
-
         const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
-
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
         batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
+
 
       self._storeIndex.batch(batch, err => {
         if (err) this.emit('error', err)
