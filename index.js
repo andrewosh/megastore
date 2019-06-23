@@ -124,7 +124,6 @@ class Megastore extends EventEmitter {
         // If it could not be seeded, then it was indexed by name
         continue
       }
-      await this._seedDiscoverableSubfeeds(key)
     }
   }
 
@@ -205,8 +204,7 @@ class Megastore extends EventEmitter {
         }
 
         if (self.networking && opts.seed !== false) {
-          self.networking.seed(core.discoveryKey)
-          self._seeding.add(mainDiscoveryKeyString)
+          self._seed(encodedDiscoveryKey)
         }
 
       } else {
@@ -220,7 +218,7 @@ class Megastore extends EventEmitter {
 
     function close (cb) {
       if (self.networking && mainDiscoveryKeyString && self.isSeeding(mainDiscoveryKeyString)) {
-        self.networking.unseed(mainDiscoveryKeyString)
+        self._unseed(mainDiscoveryKeyString)
       }
 
       const cores = innerList()
