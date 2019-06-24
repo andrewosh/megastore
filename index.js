@@ -215,14 +215,15 @@ class Megastore extends EventEmitter {
           mainDiscoveryKeyString = encodedDiscoveryKey
           mainKeyString = encodedKey
           self._corestores.set(name, wrappedStore)
+          if (self.networking && opts.seed !== false) {
+            self._seed(encodedDiscoveryKey)
+          }
         } else {
           batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+          if (self.networking) {
+            self._seed(encodedDiscoveryKey)
+          }
         }
-
-        if (self.networking && opts.seed !== false) {
-          self._seed(encodedDiscoveryKey)
-        }
-
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
