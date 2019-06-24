@@ -168,11 +168,9 @@ class Megastore extends EventEmitter {
     return wrappedStore
 
     function getCore (getter, coreOpts) {
-      console.log('CORE OPTS HEEERR:', coreOpts)
       if (coreOpts && coreOpts.key) {
         const existing = self._cores.get(datEncoding.encode(coreOpts.key))
         if (existing) {
-          console.log('IT EXISTS:', existing)
           var { core, refs } = existing
           const dkey = datEncoding.encode(core.discoveryKey)
           if (refs.indexOf(name) === -1) refs.push(name)
@@ -201,7 +199,6 @@ class Megastore extends EventEmitter {
       batch.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value })
       self._cores.set(encodedKey, { core, refs: [name] })
 
-      console.log('COREOPTS:', coreOpts)
       if (coreOpts.default || coreOpts.discoverable) {
         const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
@@ -291,7 +288,6 @@ class Megastore extends EventEmitter {
     }
 
     function wrappedGet (coreOpts = {}) {
-      console.log('WRAPPED GET COREOPTS:', coreOpts)
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
       return getCore(innerGet, coreOpts)
     }
@@ -302,6 +298,7 @@ class Megastore extends EventEmitter {
   }
 
   async seed (idx) {
+    console.error('MEGASTORE CALLING SEED FOR IDX:', idx)
     if (idx instanceof Buffer) idx = datEncoding.encode(idx)
 
     const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
