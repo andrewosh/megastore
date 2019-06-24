@@ -746,7 +746,7 @@ test('inner corestore is replicated with the discoverable flag across restarts',
   }
 })
 
-test('discoverable inner corestore with injection', async t => {
+test.only('discoverable inner corestore with injection', async t => {
   const megastore1 = new Megastore(path => ram('m1/' + path), memdb(), createNetworker())
   const megastore2 = new Megastore(path => ram('m2/' + path), memdb(), createNetworker())
   await megastore1.ready()
@@ -807,8 +807,10 @@ test('discoverable inner corestore with injection', async t => {
   }
 
   async function verify ([core1, core2]) {
+    console.log('in verify')
     return new Promise(resolve => {
       core1.get(0, (err, contents) => {
+        console.log('core1 contents:', contents)
         t.error(err, 'no error')
         t.same(contents, Buffer.from('hello'))
         core2.get(0, (err, contents) => {

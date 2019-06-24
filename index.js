@@ -25,22 +25,8 @@ class Megastore extends EventEmitter {
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
-        const existing = this._corestoresByDKey.get(dkey)
-        if (existing) return existing.replicate
-        try {
-          const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
-          if (coreOpts.seed === false) return null
-
-          const store = this._corestoresByDKey.get(dkey) || this.get(name, coreOpts)
-
-          // Inflating the default hypercore here will set the default key and bootstrap replication.
-          store.default(datEncoding.decode(key))
-
-          return store.replicate
-        } catch (err) {
-          if (!err.notFound) throw err
-          return null
-        }
+        const stores = await this._getAllCorestores(dkey)
+        return stores.map(store => store.replicate)
       })
     }
 
@@ -87,6 +73,29 @@ class Megastore extends EventEmitter {
         secretKey: Buffer.from(value.secretKey, 'hex')
       })
     }
+  }
+
+  async _getAllCorestores (dkey) {
+    const prefix = CORESTORE_PREFIX + dkey + '/'
+    const records = await this._collect(this._storeIndex, prefix)
+    const cache = this._corestoresByDKey.get(dkey)
+
+    const stores = []
+
+    for (const { value: { name, key, opts: coreOpts } } of records) {
+      const cached = cache && cache.get(name)
+      if (cached) {
+        stores.push(cached)
+        continue
+      }
+
+      const store = this.get(name, coreOpts)
+      // Inflating the default hypercore here will set the default key and bootstrap replication.
+      store.default(datEncoding.decode(key))
+      stores.push(store)
+    }
+
+    return stores
   }
 
   _seed (dkey) {
@@ -205,16 +214,21 @@ class Megastore extends EventEmitter {
         const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
         batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey + '/' + name, value: record })
 
         self._corestores.set(encodedKey, wrappedStore)
-        console.log('SETTING', encodedDiscoveryKey, 'IN CORESTORESBYDKEY')
-        self._corestoresByDKey.set(encodedDiscoveryKey, wrappedStore)
+        var dkeyMap = self._corestoresByDKey.get(encodedDiscoveryKey)
+        if (!dkeyMap) {
+          dkeyMap = new Map()
+          self._corestoresByDKey.set(encodedDiscoveryKey, dkeyMap)
+        }
+        dkeyMap.set(name, wrappedStore)
 
         if (coreOpts.default) {
           mainDiscoveryKeyString = encodedDiscoveryKey
           mainKeyString = encodedKey
           self._corestores.set(name, wrappedStore)
+          batch.push({ type: 'put', key: CORESTORE_PREFIX + mainDiscoveryKeyString, value: record })
         } else {
           batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
         }
