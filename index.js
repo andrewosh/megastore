@@ -31,7 +31,7 @@ class Megastore extends EventEmitter {
           const { name, key, opts: coreOpts } = await this._storeIndex.get('corestore/' + dkey)
           if (coreOpts.seed === false) return null
 
-          const store = this._corestoresByDKey.get(dkey) || this.get(name)
+          const store = this._corestoresByDKey.get(dkey) || this.get(name, coreOpts)
 
           // Inflating the default hypercore here will set the default key and bootstrap replication.
           store.default(datEncoding.decode(key))
@@ -174,7 +174,7 @@ class Megastore extends EventEmitter {
           var { core, refs } = existing
           const dkey = datEncoding.encode(core.discoveryKey)
           if (refs.indexOf(name) === -1) refs.push(name)
-          if (!self.isSeeding(dkey) && coreOpts.discoverable) {
+          if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
             self._seed(dkey)
           }
           return core
@@ -194,6 +194,7 @@ class Megastore extends EventEmitter {
       const value = {
         key: core.key,
         seed: opts.seed !== false,
+        sparse: opts.sparse !== false,
         writable: core.writable,
       }
 
@@ -214,14 +215,11 @@ class Megastore extends EventEmitter {
           mainDiscoveryKeyString = encodedDiscoveryKey
           mainKeyString = encodedKey
           self._corestores.set(name, wrappedStore)
-          if (self.networking && opts.seed !== false) {
-            self._seed(encodedDiscoveryKey)
-          }
         } else {
           batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
-          if (self.networking) {
-            self._seed(encodedDiscoveryKey)
-          }
+        }
+        if (self.networking && opts.seed !== false) {
+          self._seed(encodedDiscoveryKey)
         }
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
