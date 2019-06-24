@@ -90,11 +90,19 @@ class Megastore extends EventEmitter {
   }
 
   _seed (dkey) {
+    // Ensure that this is a valid hypercore key string.
+    dkey = datEncoding.encode(dkey)
+
+    console.error('SEEDING DKEY:', dkey)
     this._seeding.add(dkey)
     this.networking.seed(datEncoding.decode(dkey))
   }
 
   _unseed (dkey) {
+    // Ensure that this is a valid hypercore key string.
+    dkey = datEncoding.encode(dkey)
+
+    console.error('UNSEEDING DKEY:', dkey)
     this._seeding.delete(dkey)
     this.networking.unseed(datEncoding.decode(dkey))
   }
@@ -139,8 +147,8 @@ class Megastore extends EventEmitter {
 
   get (name, opts = {}) {
     const self = this
-    var mainDiscoveryKeyString, mainKeyString
 
+    var mainDiscoveryKeyString, mainKeyString
     const store = corestore(this.storage, { ...this.opts, ...opts })
     const {
       get: innerGet,
@@ -160,14 +168,21 @@ class Megastore extends EventEmitter {
     return wrappedStore
 
     function getCore (getter, coreOpts) {
+      console.log('CORE OPTS HEEERR:', coreOpts)
       if (coreOpts && coreOpts.key) {
         const existing = self._cores.get(datEncoding.encode(coreOpts.key))
         if (existing) {
-          if (existing.refs.indexOf(name) === -1) existing.refs.push(name)
-          return existing.core
+          console.log('IT EXISTS:', existing)
+          var { core, refs } = existing
+          const dkey = datEncoding.encode(core.discoveryKey)
+          if (refs.indexOf(name) === -1) refs.push(name)
+          if (!self.isSeeding(dkey) && coreOpts.discoverable) {
+            self._seed(dkey)
+          }
+          return core
         }
       }
-      const core = getter(coreOpts)
+      core = getter(coreOpts)
       core.on('ready', () => processCore(core, coreOpts))
       return core
     }
@@ -186,6 +201,7 @@ class Megastore extends EventEmitter {
       batch.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value })
       self._cores.set(encodedKey, { core, refs: [name] })
 
+      console.log('COREOPTS:', coreOpts)
       if (coreOpts.default || coreOpts.discoverable) {
         const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
@@ -274,6 +290,7 @@ class Megastore extends EventEmitter {
     }
 
     function wrappedGet (coreOpts = {}) {
+      console.log('WRAPPED GET COREOPTS:', coreOpts)
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
       return getCore(innerGet, coreOpts)
     }
@@ -297,8 +314,7 @@ class Megastore extends EventEmitter {
       { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
     ])
 
-    this._seeding.add(record.discoveryKey)
-    this.networking.seed(dkey)
+    this._seed(record.discoveryKey)
 
     await this._seedDiscoverableSubfeeds(record.discoveryKey)
   }
@@ -317,8 +333,7 @@ class Megastore extends EventEmitter {
       { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
     ])
 
-    this._seeding.delete(record.discoveryKey)
-    this.networking.unseed(dkey)
+    this._unseed(record.discoveryKey)
 
     await this._unseedDiscoverableSubfeeds(record.discoveryKey)
   }

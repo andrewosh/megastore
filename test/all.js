@@ -746,6 +746,73 @@ test('inner corestore is replicated with the discoverable flag across restarts',
   }
 })
 
+test('discoverable inner corestore with injection', async t => {
+  const megastore1 = new Megastore(path => ram('m1/' + path), memdb(), createNetworker())
+  const megastore2 = new Megastore(path => ram('m2/' + path), memdb(), createNetworker())
+  await megastore1.ready()
+  await megastore2.ready()
+
+  megastore1.on('error', err => t.fail(err))
+  megastore2.on('error', err => t.fail(err))
+
+  const firstCores = await createFirst()
+  const secondCores = await createSecond(firstCores)
+  await verify(secondCores)
+
+  await megastore1.close()
+  await megastore2.close()
+
+  t.end()
+
+  async function createFirst () {
+    const cs1 = megastore1.get('cs1', { seed: false })
+    const core1 = cs1.default()
+    const core2 = cs1.get()
+
+    await new Promise(resolve => {
+      core1.append('hello', err => {
+        t.error(err, 'no error')
+        core2.append('goodbye', err => {
+          t.error(err, 'no error')
+          return resolve([core1, core2])
+        })
+      })
+    })
+
+    const cs2 = megastore1.get('cs2', { seed: false })
+    const core3 = cs2.default()
+    const core4 = cs2.get({ key: core1.key, discoverable: true })
+    const core5 = cs2.get(core2.key)
+
+    return [core4, core5]
+  }
+
+  function createSecond([c1, c2]) {
+    const cs1 = megastore2.get('cs1')
+    const core1 = cs1.default(c1.key)
+
+    const cs2 = megastore2.get('cs2', { seed: false })
+    const core2 = cs2.default(c1.key)
+    const core3 = cs2.get({ key: c1.key, discoverable: true })
+    const core4 = cs2.get(c2.key)
+
+    return [core3, core4]
+  }
+
+  async function verify ([core1, core2]) {
+    return new Promise(resolve => {
+      core1.get(0, (err, contents) => {
+        t.error(err, 'no error')
+        t.same(contents, Buffer.from('hello'))
+        core2.get(0, (err, contents) => {
+          t.same(contents, Buffer.from('goodbye'))
+          return resolve()
+        })
+      })
+    })
+  }
+})
+
 test('lists all corestores')
 
 async function cleanup (dirs) {
@@ -755,4 +822,8 @@ async function cleanup (dirs) {
       return resolve()
     })
   })))
+}
+
+function delay (ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
