@@ -765,9 +765,9 @@ test('discoverable inner corestore with injection', async t => {
   t.end()
 
   async function createFirst () {
-    const cs1 = megastore1.get('cs1', { seed: false })
-    const core1 = cs1.default()
-    const core2 = cs1.get()
+    const cs1 = megastore1.get('cs1')
+    const core1 = cs1.default({ sparse: true })
+    const core2 = cs1.get({ sparse: true })
 
     await new Promise(resolve => {
       core1.append('hello', err => {
@@ -780,21 +780,28 @@ test('discoverable inner corestore with injection', async t => {
     })
 
     const cs2 = megastore1.get('cs2', { seed: false })
-    const core3 = cs2.default()
-    const core4 = cs2.get({ key: core1.key, discoverable: true })
-    const core5 = cs2.get(core2.key)
+    const core3 = cs2.default({ sparse: true})
+    const core4 = cs2.get({ key: core1.key, discoverable: true, sparse: true })
 
-    return [core4, core5]
+    return [core4, core2]
   }
 
-  function createSecond([c1, c2]) {
-    const cs1 = megastore2.get('cs1')
-    const core1 = cs1.default(c1.key)
-
+  async function createSecond([c1, c2]) {
     const cs2 = megastore2.get('cs2', { seed: false })
-    const core2 = cs2.default(c1.key)
-    const core3 = cs2.get({ key: c1.key, discoverable: true })
-    const core4 = cs2.get(c2.key)
+    const core2 = cs2.default({ sparse: true })
+    const core3 = cs2.get({ key: c1.key, discoverable: true, sparse: true })
+    const core4 = cs2.get({ key: c2.key, sparse: true })
+
+    await new Promise(resolve => {
+      core3.ready(resolve)
+    })
+
+    const cs1 = megastore2.get('cs1')
+    const core1 = cs1.default({ key: c1.key, sparse: true })
+
+    await new Promise(resolve => {
+      core1.ready(resolve)
+    })
 
     return [core3, core4]
   }

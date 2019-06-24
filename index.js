@@ -186,6 +186,7 @@ class Megastore extends EventEmitter {
     }
 
     function processCore (core, coreOpts) {
+      console.log('**** PROCESSING CORE:', core)
       const batch = []
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
@@ -206,6 +207,7 @@ class Megastore extends EventEmitter {
         batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
 
         self._corestores.set(encodedKey, wrappedStore)
+        console.log('SETTING', encodedDiscoveryKey, 'IN CORESTORESBYDKEY')
         self._corestoresByDKey.set(encodedDiscoveryKey, wrappedStore)
 
         if (coreOpts.default) {
