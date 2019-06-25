@@ -30,7 +30,8 @@ class Megastore extends EventEmitter {
         try {
           var store = await this._getPrimaryStore(dkey)
         } catch (err) {
-          console.log('ERROR HERE:', err)
+          //console.log('ERROR HERE:', err)
+          return null
         }
         return store.replicate
       })
@@ -220,12 +221,20 @@ class Megastore extends EventEmitter {
           const dkey = datEncoding.encode(core.discoveryKey)
           if (refs.indexOf(name) === -1) refs.push(name)
 
-          // TODO: Simplify this
-          if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
-            self._seed(dkey)
-          }
           if (!innerCores.get(dkey)) {
-            core.ready(() => processCore(core, coreOpts))
+            // TODO: Simplify this
+            if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
+              self._seed(dkey)
+            }
+            if (coreOpts.discoverable) {
+              core.ready(err => {
+                if (err) return this.emit('error', err)
+                this._storeIndex.put(DISCOVERABLE_PREFIX, + mainDiscoveryKeyString, + '/' + dkey, err => {
+                  if (err) return this.emit('error', err)
+                })
+              })
+              innerCores.put(dkey, core)
+            }
           }
 
           return core
