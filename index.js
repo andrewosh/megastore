@@ -229,13 +229,16 @@ class Megastore extends EventEmitter {
             if (coreOpts.discoverable) {
               core.ready(err => {
                 if (err) return self.emit('error', err)
-                self._storeIndex.put(DISCOVERABLE_PREFIX, + mainDiscoveryKeyString, + '/' + dkey, err => {
+                console.error('PUTTING HERE')
+                self._storeIndex.put(DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + dkey, {}, err => {
+                  console.error('AFTER PUT, err:', err)
                   if (err) return self.emit('error', err)
                 })
               })
-              innerCores.put(dkey, core)
+              innerCores.set(dkey, core)
             }
           }
+          console.error('RETURNING CORE')
 
           return core
         }
