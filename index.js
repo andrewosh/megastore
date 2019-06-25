@@ -188,6 +188,8 @@ class Megastore extends EventEmitter {
     const self = this
 
     var mainDiscoveryKeyString, mainKeyString
+    const innerCores = new Map()
+
     const store = corestore(this.storage, { ...this.opts, ...opts })
     const {
       get: innerGet,
@@ -214,11 +216,18 @@ class Megastore extends EventEmitter {
         const existing = self._cores.get(datEncoding.encode(coreOpts.key))
         console.error('SELF._CORES:', self._cores, 'mainDiscoveryKeyString:', mainDiscoveryKeyString, 'keyString:', datEncoding.encode(coreOpts.key))
         if (existing) {
-          console.error('THE CORE EXISTS!')
           var { core, refs } = existing
           const dkey = datEncoding.encode(core.discoveryKey)
           if (refs.indexOf(name) === -1) refs.push(name)
-          core.ready(() => processCore(core, coreOpts))
+
+          // TODO: Simplify this
+          if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
+            self._seed(dkey)
+          }
+          if (!innerCores.get(dkey)) {
+            core.ready(() => processCore(core, coreOpts))
+          }
+
           return core
         }
       }
@@ -273,6 +282,8 @@ class Megastore extends EventEmitter {
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
+
+      innerCores.set(encodedDiscoveryKey, core)
 
       self._storeIndex.batch(batch, err => {
         if (err) this.emit('error', err)
