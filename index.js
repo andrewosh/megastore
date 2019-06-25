@@ -117,11 +117,14 @@ class Megastore extends EventEmitter {
   }
 
   async _getDiscoverableKeys (dkey) {
+    console.error('GETTING DISCOVERABLE')
     const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
+    console.error('COLLECTED')
     const keys = [dkey]
     for (const { key, value } of feedList) {
       keys.push(key.split('/')[2])
     }
+    console.error('RETURNING KEYS:', keys)
     return keys
   }
 
@@ -209,23 +212,23 @@ class Megastore extends EventEmitter {
     function getCore (getter, coreOpts) {
       if (coreOpts && coreOpts.key) {
         const existing = self._cores.get(datEncoding.encode(coreOpts.key))
+        console.error('SELF._CORES:', self._cores, 'mainDiscoveryKeyString:', mainDiscoveryKeyString, 'keyString:', datEncoding.encode(coreOpts.key))
         if (existing) {
+          console.error('THE CORE EXISTS!')
           var { core, refs } = existing
           const dkey = datEncoding.encode(core.discoveryKey)
           if (refs.indexOf(name) === -1) refs.push(name)
-          if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
-            self._seed(dkey)
-          }
+          core.ready(() => processCore(core, coreOpts))
           return core
         }
       }
       core = getter(coreOpts)
-      core.on('ready', () => processCore(core, coreOpts))
+      core.ready(() => processCore(core, coreOpts))
       return core
     }
 
     function processCore (core, coreOpts) {
-      console.log('**** PROCESSING CORE:', core)
+      console.log('**** PROCESSING CORE:', core, 'OPTS:', coreOpts, 'MAIN DKEY:', mainDiscoveryKeyString)
       const batch = []
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
@@ -261,6 +264,7 @@ class Megastore extends EventEmitter {
           self._corestores.set(name, wrappedStore)
           batch.push({ type: 'put', key: CORESTORE_PREFIX + mainDiscoveryKeyString, value: record })
         } else {
+          console.error('ADDING DISCOVERABLE WITH KEY:', encodedDiscoveryKey, 'TO:', mainDiscoveryKeyString)
           batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
         }
         if (self.networking && opts.seed !== false) {
@@ -270,14 +274,13 @@ class Megastore extends EventEmitter {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
       }
 
-      if (self.networking) {
-        self._getDiscoverableKeys(mainDiscoveryKeyString)
-          .then(keys => self.networking.injectCore(core, keys))
-          .catch(err => self.emit('error', err))
-      }
-
       self._storeIndex.batch(batch, err => {
         if (err) this.emit('error', err)
+        if (self.networking) {
+          self._getDiscoverableKeys(mainDiscoveryKeyString)
+            .then(keys => self.networking.injectCore(core, keys))
+            .catch(err => self.emit('error', err))
+        }
       })
     }
 
@@ -340,6 +343,7 @@ class Megastore extends EventEmitter {
 
     function wrappedGet (coreOpts = {}) {
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
+      console.error('IN WRAPPED GET, coreOpts:', coreOpts)
       return getCore(innerGet, coreOpts)
     }
 
