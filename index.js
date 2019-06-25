@@ -116,6 +116,15 @@ class Megastore extends EventEmitter {
     return stores
   }
 
+  async _getDiscoverableKeys (dkey) {
+    const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
+    const keys = [dkey]
+    for (const { key, value } of feedList) {
+      keys.push(key.split('/')[2])
+    }
+    return keys
+  }
+
   _seed (dkey) {
     // Ensure that this is a valid hypercore key string.
     dkey = datEncoding.encode(dkey)
@@ -135,28 +144,28 @@ class Megastore extends EventEmitter {
   }
 
   async _seedDiscoverableSubfeeds (dkey) {
-    const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
-    for (const { key, value } of feedList) {
-      this._seed(key.split('/')[2])
+    const keyList = await this._getDiscoverableKeys(dkey)
+    for (const key of keyList) {
+      this._seed(key)
     }
   }
 
   async _unseedDiscoverableSubfeeds (dkey) {
-    const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
-    for (const { key, value } of feedList) {
-      this._unseed(key.split('/')[2])
+    const keyList = await this._getDiscoverableKeys(dkey)
+    for (const key of keyList) {
+      this._unseed(key)
     }
   }
 
   async _reseed () {
     const storeList = await this._collect(this._storeIndex, CORESTORE_PREFIX)
-    console.log('storeList:', storeList)
     for (let { key, value } of storeList) {
       if (value.seed === false) continue
       try {
         this._seed(value.discoveryKey)
       } catch (err) {
         // If it could not be seeded, then it was indexed by name
+        console.error('RESEED ERR:', err)
         continue
       }
     }
@@ -262,7 +271,9 @@ class Megastore extends EventEmitter {
       }
 
       if (self.networking) {
-        self.networking.injectCore(core, mainDiscoveryKeyString)
+        self._getDiscoverableKeys(mainDiscoveryKeyString)
+          .then(keys => self.networking.injectCore(core, keys))
+          .catch(err => self.emit('error', err))
       }
 
       self._storeIndex.batch(batch, err => {
@@ -337,11 +348,10 @@ class Megastore extends EventEmitter {
       const outerStream = replicationOpts && replicationOpts.stream
       console.log('BEFORE INNER REPLICATE')
       const stream = innerReplicate({ ...replicationOpts, stream: outerStream })
-      console.log('STREAM RIGHT HERE:', stream)
 
       self._getAllCorestores(mainDiscoveryKeyString)
         .then(otherStores => {
-          console.log(name, 'IN WRAPPED REPLICATE, otherStores:', otherStores)
+          console.log(name, 'IN WRAPPED REPLICATE, otherStores:', otherStores.map(os => os.name))
           for (const store of otherStores) {
             // TODO: Error handling here?
             if (store.name === name) continue
