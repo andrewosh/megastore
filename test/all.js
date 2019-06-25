@@ -99,7 +99,7 @@ test('replication of two corestores with multiple channels', async t => {
   t.end()
 })
 
-test.skip('replicates across restarts', async t => {
+test('replicates across restarts', async t => {
   const megastore1 = new Megastore(path => ram('m1/' + path), memdb(), createNetworker())
   const megastore2 = new Megastore(path => ram('m2/' + path), memdb(), createNetworker())
   var defaultKey
@@ -737,16 +737,17 @@ test('inner corestore is replicated with the discoverable flag across restarts',
     return new Promise(resolve => {
       core2.ready(err => {
         t.error(err, 'no error')
+        console.log('core2 is:', core2)
         setTimeout(() => {
           t.same(core2.remoteLength, 1)
           return resolve()
-        }, 200)
+        }, 500)
       })
     })
   }
 })
 
-test.only('discoverable inner corestore with injection', async t => {
+test.skip('discoverable inner corestore with injection', async t => {
   const megastore1 = new Megastore(path => ram('m1/' + path), memdb(), createNetworker())
   const megastore2 = new Megastore(path => ram('m2/' + path), memdb(), createNetworker())
   await megastore1.ready()

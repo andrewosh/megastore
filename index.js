@@ -4,6 +4,7 @@ const sub = require('subleveldown')
 const crypto = require('hypercore-crypto')
 const corestore = require('random-access-corestore')
 const collect = require('stream-collector')
+const duplexify = require('duplexify')
 
 const CORESTORE_PREFIX = 'corestore/'
 const DISCOVERABLE_PREFIX = 'discoverable/'
@@ -25,8 +26,13 @@ class Megastore extends EventEmitter {
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
-        const stores = await this._getAllCorestores(dkey)
-        return stores.map(store => store.replicate)
+        console.log('GOT DKEY REQUEST:', dkey)
+        try {
+          var store = await this._getPrimaryStore(dkey)
+        } catch (err) {
+          console.log('ERROR HERE:', err)
+        }
+        return store.replicate
       })
     }
 
@@ -73,6 +79,18 @@ class Megastore extends EventEmitter {
         secretKey: Buffer.from(value.secretKey, 'hex')
       })
     }
+  }
+
+  async _getPrimaryStore (dkey) {
+    const { name, key, coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    const cached = this._corestores.get(name)
+    console.log('CACHED HERE??', !!cached, 'name:', name, 'key:', key)
+    if (cached) return cached
+
+    const store = this.get(name, { ...this.opts, ...coreOpts })
+    store.default(datEncoding.decode(key))
+
+    return store
   }
 
   async _getAllCorestores (dkey) {
@@ -132,11 +150,11 @@ class Megastore extends EventEmitter {
 
   async _reseed () {
     const storeList = await this._collect(this._storeIndex, CORESTORE_PREFIX)
+    console.log('storeList:', storeList)
     for (let { key, value } of storeList) {
       if (value.seed === false) continue
-      key = key.slice(10)
       try {
-        this._seed(key)
+        this._seed(value.discoveryKey)
       } catch (err) {
         // If it could not be seeded, then it was indexed by name
         continue
@@ -171,7 +189,10 @@ class Megastore extends EventEmitter {
       get: wrappedGet,
       replicate: innerReplicate,
       list: innerList,
-      close
+      replicate: wrappedReplicate,
+      close,
+      name,
+      _inner: store
     }
 
     return wrappedStore
@@ -215,8 +236,8 @@ class Megastore extends EventEmitter {
 
         batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
         batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey + '/' + name, value: record })
+        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
 
-        self._corestores.set(encodedKey, wrappedStore)
         var dkeyMap = self._corestoresByDKey.get(encodedDiscoveryKey)
         if (!dkeyMap) {
           dkeyMap = new Map()
@@ -227,6 +248,7 @@ class Megastore extends EventEmitter {
         if (coreOpts.default) {
           mainDiscoveryKeyString = encodedDiscoveryKey
           mainKeyString = encodedKey
+          self._corestores.set(encodedKey, wrappedStore)
           self._corestores.set(name, wrappedStore)
           batch.push({ type: 'put', key: CORESTORE_PREFIX + mainDiscoveryKeyString, value: record })
         } else {
@@ -237,6 +259,10 @@ class Megastore extends EventEmitter {
         }
       } else {
         batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+      }
+
+      if (self.networking) {
+        self.networking.injectCore(core, mainDiscoveryKeyString)
       }
 
       self._storeIndex.batch(batch, err => {
@@ -304,6 +330,28 @@ class Megastore extends EventEmitter {
     function wrappedGet (coreOpts = {}) {
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
       return getCore(innerGet, coreOpts)
+    }
+
+    function wrappedReplicate (replicationOpts) {
+      console.log('IN WRAPPED REPLICATE')
+      const outerStream = replicationOpts && replicationOpts.stream
+      console.log('BEFORE INNER REPLICATE')
+      const stream = innerReplicate({ ...replicationOpts, stream: outerStream })
+      console.log('STREAM RIGHT HERE:', stream)
+
+      self._getAllCorestores(mainDiscoveryKeyString)
+        .then(otherStores => {
+          console.log(name, 'IN WRAPPED REPLICATE, otherStores:', otherStores)
+          for (const store of otherStores) {
+            // TODO: Error handling here?
+            if (store.name === name) continue
+            console.log('REPLICATING ANOTHER')
+            store._inner.replicate({ ...replicationOpts, stream: outerStream || stream })
+          }
+        })
+        .catch(err => stream.destroy(err))
+
+      return stream
     }
   }
 
