@@ -5,6 +5,7 @@ const crypto = require('hypercore-crypto')
 const corestore = require('random-access-corestore')
 const collect = require('stream-collector')
 const duplexify = require('duplexify')
+const bjson = require('buffer-json-encoding')
 const thunky = require('thunky')
 
 const CORESTORE_PREFIX = 'corestore/'
@@ -28,19 +29,20 @@ class Megastore extends EventEmitter {
     if (this.networking) {
       this.networking.on('error', err => this.emit('error', err))
       this.networking.setReplicatorFactory(async dkey => {
-        console.log('GOT DKEY REQUEST:', dkey)
+        console.log(this._id, 'GOT DKEY REQUEST:', dkey)
         try {
           var store = await this._getPrimaryStore(dkey)
-          console.log('PRIMARY STORE:', store)
         } catch (err) {
+          console.log(this._id, err)
           return null
         }
+        console.log('STORE HERE:', store)
         return store.replicate
       })
     }
 
-    this._storeIndex = sub(this.db, 'stores', { valueEncoding: 'json' })
-    this._keyIndex = sub(this.db, 'keys', { valueEncoding: 'json' })
+    this._storeIndex = sub(this.db, 'stores', { valueEncoding: bjson })
+    this._keyIndex = sub(this.db, 'keys', { valueEncoding: bjson })
 
     // The megastore duplicates storage across corestore instances. This top-level cache allows us to
     // reuse in-memory hypercores.
@@ -85,60 +87,64 @@ class Megastore extends EventEmitter {
   }
 
   async _getPrimaryStore (dkey) {
-    console.error('GETTING PRIMARY STORE FOR DKEY:', dkey)
-    const primaryDKey = await this._storeIndex.get(DISCOVERABLE_PREFIX + dkey)
-    const { name, key, opts: coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + primaryDKey)
-    console.log('NAME HERE:', name,'KEY HERE:', key)
+    const { name, key } = await this._storeIndex.get(DISCOVERABLE_PREFIX + dkey)
+    const { opts: coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    //console.log('NAME HERE:', name,'KEY HERE:', key)
+
     const cached = this._corestores.get(name)
-    console.log('CACHED HERE??', !!cached, 'name:', name, 'key:', key)
+    console.log('CACHED HERE??', !!cached, 'name:', dkey, 'key:', key)
     if (cached) return cached
 
+    console.log('### PRIMARY STORE KEY HERE IS:', key)
     const store = this.get(name, { ...this.opts })
-    store.default(datEncoding.decode(key))
-
-    return store
+    return new Promise((resolve, reject) => {
+      const core = store.default({ key, ...coreOpts })
+      core.ready(err => {
+        if (err) return reject(err)
+        console.log('DEFAULT CORE IS READY')
+        return resolve(store)
+      })
+    })
   }
 
   async _getAllCorestores (dkey) {
-    const prefix = CORESTORE_PREFIX + dkey + '/'
-    const records = await this._collect(this._storeIndex, prefix)
+    const keyMap = await this._getDiscoverableKeys(dkey)
     const cache = this._corestoresByDKey.get(dkey)
 
-    const stores = []
+    const stores = new Map()
 
-    for (const { value: { name, key, opts: coreOpts } } of records) {
-      const cached = cache && cache.get(name)
+    for (const [dkey, name] of keyMap) {
+      const cached = cache && cache.get(dkey)
       if (cached) {
         stores.push(cached)
         continue
       }
 
+      const { key, opts: coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + name)
+      if (stores.get(name)) continue
+
       const store = this.get(name, coreOpts)
-      // Inflating the default hypercore here will set the default key and bootstrap replication.
+        // Inflating the default hypercore here will set the default key and bootstrap replication.
       store.default(datEncoding.decode(key))
-      stores.push(store)
+      stores.set(name, store)
     }
 
-    return stores
+    return stores.values()
   }
 
   async _getDiscoverableKeys (dkey) {
-    console.error('GETTING DISCOVERABLE')
+    // console.error(this._id, 'GETTING DISCOVERABLE FOR DKEY:', dkey)
     const feedList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + dkey + '/')
-    console.error('COLLECTED')
-    const keys = [dkey]
+    const keys = new Map()
     for (const { key, value } of feedList) {
-      keys.push(key.split('/')[2])
+      keys.set(key.split('/')[2], value)
     }
-    console.error('RETURNING KEYS:', keys)
+    // console.error(this._id, 'RETURNING KEYS FOR DKEY:', dkey, keys)
     return keys
   }
 
   _seed (dkey) {
-    // Ensure that this is a valid hypercore key string.
-    dkey = datEncoding.encode(dkey)
-
-    console.error('SEEDING DKEY:', dkey)
+    //console.error('SEEDING DKEY:', dkey)
     this._seeding.add(dkey)
     this.networking.seed(datEncoding.decode(dkey))
 
@@ -146,10 +152,7 @@ class Megastore extends EventEmitter {
   }
 
   _unseed (dkey) {
-    // Ensure that this is a valid hypercore key string.
-    dkey = datEncoding.encode(dkey)
-
-    console.error('UNSEEDING DKEY:', dkey)
+    //console.error('UNSEEDING DKEY:', dkey)
     this._seeding.delete(dkey)
     this.networking.unseed(datEncoding.decode(dkey))
 
@@ -158,24 +161,24 @@ class Megastore extends EventEmitter {
 
   async _seedDiscoverableSubfeeds (dkey) {
     const keyList = await this._getDiscoverableKeys(dkey)
-    for (const key of keyList) {
+    for (const key of keyList.keys()) {
       this._seed(key)
     }
   }
 
   async _unseedDiscoverableSubfeeds (dkey) {
     const keyList = await this._getDiscoverableKeys(dkey)
-    for (const key of keyList) {
+    for (const key of keyList.keys()) {
       this._unseed(key)
     }
   }
 
   async _reseed () {
     const storeList = await this._collect(this._storeIndex, SEEDING_PREFIX)
+    const keys = []
     for (let { key, value } of storeList) {
       key = key.slice(SEEDING_PREFIX.length)
-      console.error('***RESEEDING ROOT KEY:', key)
-      this._seed(key)
+      keys.push(key)
       try {
         var discoverableList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + key)
       } catch (err) {
@@ -184,9 +187,12 @@ class Megastore extends EventEmitter {
       }
       for (let { key, value } of discoverableList) {
         key = key.split('/')[2]
-        console.log('***RESEEDING DISCOVERABLE KEY HERE:', key)
-        this._seed(key)
+        keys.push(key)
       }
+    }
+    for (const seedKey of [...new Set(keys)]) {
+      console.log(this._id, '***RESEEDING DISCOVERABLE KEY HERE:', seedKey)
+      this._seed(seedKey)
     }
   }
 
@@ -231,7 +237,6 @@ class Megastore extends EventEmitter {
       var core = getCachedAndSeed()
       if (core) return core
 
-      console.log('COREOPTS BEFORE GETTER:', coreOpts)
       core = getter(coreOpts)
 
       const ready = core.ready.bind(core)
@@ -249,25 +254,29 @@ class Megastore extends EventEmitter {
       function getCachedAndSeed () {
         if (!coreOpts || !coreOpts.key) return null
         const existing = self._cores.get(datEncoding.encode(coreOpts.key))
-        console.log('CORE EXISTING??', !!existing)
         if (!existing) return null
 
         const { core, refs } = existing
         const dkey = datEncoding.encode(core.discoveryKey)
         if (refs.indexOf(name) === -1) refs.push(name)
 
-        if (!innerCores.get(dkey) && !self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
-          seed(dkey)
+        if (self.networking && !innerCores.get(dkey) && coreOpts.discoverable) {
+          seed(core, dkey)
+          console.log('--- GOING TO INJECT CACHED CORE')
+          self._getDiscoverableKeys(mainDiscoveryKeyString)
+            .then(keys => self.networking.injectCore(core, keys.keys()))
+            .catch(err => this.emit('error', err))
         }
 
         return core
       }
 
       function seed (core, dkey) {
-        self._seed(core, dkey)
+        console.log('---- DKEY HERE:', dkey)
+        self._seed(dkey)
         core.ready(err => {
           if (err) return self.emit('error', err)
-          return self._storeIndex.put(DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + dkey, {}, err => {
+          return self._storeIndex.put(DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + dkey, { name, mainKeyString }, err => {
             if (err) return self.emit('error', err)
             return null
           })
@@ -276,7 +285,7 @@ class Megastore extends EventEmitter {
     }
 
     async function processCore (core, coreOpts) {
-      console.log('**** PROCESSING CORE:', core, 'OPTS:', coreOpts, 'MAIN DKEY:', mainDiscoveryKeyString)
+      //console.log('**** PROCESSING CORE:', core, 'OPTS:', coreOpts, 'MAIN DKEY:', mainDiscoveryKeyString)
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
       self._cores.set(encodedKey, { core, refs: [] })
@@ -286,7 +295,9 @@ class Megastore extends EventEmitter {
         sparse: opts.sparse !== false,
         writable: core.writable,
       }
+      const corestoreValue = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
 
+      updateCache()
       const indexRecords = await index()
       const discoverableRecords = await discover()
       await self._storeIndex.batch([ ...indexRecords, ...discoverableRecords ])
@@ -294,24 +305,23 @@ class Megastore extends EventEmitter {
       const seedRecords = await seed()
       await self._storeIndex.batch(seedRecords)
 
-      updateCache()
-
       if (self.networking) {
+        console.log('GETTING DISCOVERABLE KEYS IN PROCESS CORE FOR DKEY:', encodedDiscoveryKey, 'KEY:', encodedKey)
         const discoverableKeys = await self._getDiscoverableKeys(mainDiscoveryKeyString)
-        self.networking.injectCore(core, discoverableKeys)
+        console.log('   DISCOVERABLE KEYS:')
+        self.networking.injectCore(core, discoverableKeys.keys())
       }
 
       /*
       console.log('INDEX RECORDS:', indexRecords)
       console.log('SEED RECORDS:', seedRecords)
       */
-      console.log('DISCOVERABLE RECORDS:', discoverableRecords)
+      //console.log(self._id, 'DISCOVERABLE RECORDS:', discoverableRecords)
 
       return self._storeIndex.batch([...indexRecords, ...seedRecords, ...discoverableRecords])
 
       async function index () {
         const records = []
-        const corestoreValue = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
         records.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value: coreValue })
 
         if (coreOpts.default) {
@@ -330,8 +340,9 @@ class Megastore extends EventEmitter {
         const records = []
 
         if (coreOpts.discoverable || coreOpts.default) {
-          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
-          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + encodedDiscoveryKey, value: mainDiscoveryKeyString })
+          records.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: corestoreValue })
+          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: name})
+          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + encodedDiscoveryKey, value: { name, key: encodedKey } })
         }
 
         return records
@@ -429,23 +440,22 @@ class Megastore extends EventEmitter {
 
     function wrappedGet (coreOpts = {}) {
       if (coreOpts instanceof Buffer) coreOpts = { key: coreOpts }
-      console.error('IN WRAPPED GET, coreOpts:', coreOpts)
+      //console.error('IN WRAPPED GET, coreOpts:', coreOpts)
       return getCore(innerGet, coreOpts)
     }
 
     function wrappedReplicate (replicationOpts) {
-      console.log('IN WRAPPED REPLICATE')
+      //console.log('IN WRAPPED REPLICATE')
       const outerStream = replicationOpts && replicationOpts.stream
-      console.log('BEFORE INNER REPLICATE')
+      //console.log('BEFORE INNER REPLICATE')
       const stream = innerReplicate({ ...replicationOpts, stream: outerStream })
 
       self._getAllCorestores(mainDiscoveryKeyString)
         .then(otherStores => {
-          console.log(name, 'IN WRAPPED REPLICATE, otherStores:', otherStores.map(os => os.name))
           for (const store of otherStores) {
             // TODO: Error handling here?
             if (store.name === name) continue
-            console.log('REPLICATING ANOTHER')
+            console.log('REPLICATING ANOTHER WITH NAME:', name)
             store._inner.replicate({ ...replicationOpts, stream: outerStream || stream })
           }
         })

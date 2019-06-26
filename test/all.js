@@ -191,7 +191,7 @@ test('replicates with a reopened megastore', async t => {
   var megastore1, megastore2
   const db1 = memdb()
 
-  megastore2 = new Megastore(path => raf('storage2' + '/' + path), memdb(), createNetworker())
+  megastore2 = new Megastore(path => raf('storage2/' + path), memdb(), createNetworker())
   await megastore2.ready()
   megastore2.on('error', err => t.fail(err))
 
@@ -206,7 +206,7 @@ test('replicates with a reopened megastore', async t => {
   t.end()
 
   async function populateAndClose () {
-    megastore1 = new Megastore(path => raf('storage1' + '/' + path), db1, createNetworker())
+    megastore1 = new Megastore(path => raf('storage1/' + path), db1, createNetworker())
     await megastore1.ready()
     megastore1.on('error', err => t.fail(err))
 
@@ -223,9 +223,11 @@ test('replicates with a reopened megastore', async t => {
       })
     })
     await new Promise((resolve, reject) => {
-      core2.append('hello', err => {
-        if (err) return reject(err)
-        return resolve()
+      core1.append('goodbye', err => {
+        core2.append('hello', err => {
+          if (err) return reject(err)
+          return resolve()
+        })
       })
     })
     await megastore1.close()
@@ -233,15 +235,17 @@ test('replicates with a reopened megastore', async t => {
   }
 
   async function reopenAndSync (first, second) {
-    megastore1 = new Megastore(path => raf('storage1' + '/' + path), db1, createNetworker())
+    megastore1 = new Megastore(path => raf('storage1/' + path), db1, createNetworker())
     await megastore1.ready()
     megastore1.on('error', err => t.fail(err))
 
+    console.log('FIRST IS:', first)
     const cs2 = megastore2.get('cs2')
     const core1 = cs2.default({ key: first })
     const core2 = cs2.get({ key: second })
 
     return new Promise((resolve, reject) => {
+      console.log('core1 here is:', core1)
       core2.ready(err => {
         if (err) return reject(err)
         core2.get(0, (err, contents) => {
@@ -683,12 +687,15 @@ test('inner corestore is replicated with the discoverable flag', async t => {
   }
 })
 
-test.only('inner corestore is replicated with the discoverable flag across restarts', async t => {
+test('inner corestore is replicated with the discoverable flag across restarts', async t => {
   const db1 = memdb()
   var megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
   const megastore2 = new Megastore(path => raf('m2/' + path), memdb(), createNetworker())
   await megastore1.ready()
   await megastore2.ready()
+
+  console.log('#### MEGASTORE 1 ID:', megastore1._id)
+  console.log('#### MEGASTORE 2 ID:', megastore2._id)
 
   megastore1.on('error', err => t.fail(err))
   megastore2.on('error', err => t.fail(err))
@@ -713,9 +720,15 @@ test.only('inner corestore is replicated with the discoverable flag across resta
     return new Promise(resolve => {
       core1.append('hello', err => {
         t.error(err, 'no error')
-        core3.append('goodbye', err => {
+        core2.append('dog', err => {
           t.error(err, 'no error')
-          return resolve([core1, core3])
+          core3.append('goodbye', err => {
+            t.error(err, 'no error')
+            console.log('core1 here', core1)
+            console.log('core2 here', core2)
+            console.log('core3 here', core3)
+            return resolve([core1, core3])
+          })
         })
       })
     })
@@ -727,9 +740,8 @@ test.only('inner corestore is replicated with the discoverable flag across resta
     var core2 = cs1.get({ key: c2.key, discoverable: true })
 
     await megastore1.close()
-    await delay(5000)
+    console.log(megastore1._id, 'STORE IS CLOSED')
 
-    console.log('\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n')
     megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
     await megastore1.ready()
 
@@ -738,14 +750,14 @@ test.only('inner corestore is replicated with the discoverable flag across resta
 
   async function verify ([core1, core2]) {
     return new Promise(resolve => {
-      console.log('CORE2:', core2)
       core2.ready(err => {
         t.error(err, 'no error')
         console.log('core2 is:', core2)
+        console.log('core1 is:', core1)
         setTimeout(() => {
           t.same(core2.remoteLength, 1)
           return resolve()
-        }, 500)
+        }, 200)
       })
     })
   }
