@@ -683,7 +683,7 @@ test('inner corestore is replicated with the discoverable flag', async t => {
   }
 })
 
-test('inner corestore is replicated with the discoverable flag across restarts', async t => {
+test.only('inner corestore is replicated with the discoverable flag across restarts', async t => {
   const db1 = memdb()
   var megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
   const megastore2 = new Megastore(path => raf('m2/' + path), memdb(), createNetworker())
@@ -727,6 +727,9 @@ test('inner corestore is replicated with the discoverable flag across restarts',
     var core2 = cs1.get({ key: c2.key, discoverable: true })
 
     await megastore1.close()
+    await delay(5000)
+
+    console.log('\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n')
     megastore1 = new Megastore(path => raf('m1/' + path), db1, createNetworker())
     await megastore1.ready()
 
@@ -735,6 +738,7 @@ test('inner corestore is replicated with the discoverable flag across restarts',
 
   async function verify ([core1, core2]) {
     return new Promise(resolve => {
+      console.log('CORE2:', core2)
       core2.ready(err => {
         t.error(err, 'no error')
         console.log('core2 is:', core2)

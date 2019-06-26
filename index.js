@@ -5,9 +5,11 @@ const crypto = require('hypercore-crypto')
 const corestore = require('random-access-corestore')
 const collect = require('stream-collector')
 const duplexify = require('duplexify')
+const thunky = require('thunky')
 
 const CORESTORE_PREFIX = 'corestore/'
 const DISCOVERABLE_PREFIX = 'discoverable/'
+const SEEDING_PREFIX = 'seeding/'
 const SUBCORE_PREFIX = 'subcore/'
 const CORE_PREFIX = 'core/'
 
@@ -29,8 +31,8 @@ class Megastore extends EventEmitter {
         console.log('GOT DKEY REQUEST:', dkey)
         try {
           var store = await this._getPrimaryStore(dkey)
+          console.log('PRIMARY STORE:', store)
         } catch (err) {
-          //console.log('ERROR HERE:', err)
           return null
         }
         return store.replicate
@@ -83,12 +85,15 @@ class Megastore extends EventEmitter {
   }
 
   async _getPrimaryStore (dkey) {
-    const { name, key, coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + dkey)
+    console.error('GETTING PRIMARY STORE FOR DKEY:', dkey)
+    const primaryDKey = await this._storeIndex.get(DISCOVERABLE_PREFIX + dkey)
+    const { name, key, opts: coreOpts } = await this._storeIndex.get(CORESTORE_PREFIX + primaryDKey)
+    console.log('NAME HERE:', name,'KEY HERE:', key)
     const cached = this._corestores.get(name)
     console.log('CACHED HERE??', !!cached, 'name:', name, 'key:', key)
     if (cached) return cached
 
-    const store = this.get(name, { ...this.opts, ...coreOpts })
+    const store = this.get(name, { ...this.opts })
     store.default(datEncoding.decode(key))
 
     return store
@@ -136,6 +141,8 @@ class Megastore extends EventEmitter {
     console.error('SEEDING DKEY:', dkey)
     this._seeding.add(dkey)
     this.networking.seed(datEncoding.decode(dkey))
+
+    return { type: 'put', key: SEEDING_PREFIX + dkey, value: {} }
   }
 
   _unseed (dkey) {
@@ -145,6 +152,8 @@ class Megastore extends EventEmitter {
     console.error('UNSEEDING DKEY:', dkey)
     this._seeding.delete(dkey)
     this.networking.unseed(datEncoding.decode(dkey))
+
+    return { type: 'del', key: SEEDING_PREFIX + dkey }
   }
 
   async _seedDiscoverableSubfeeds (dkey) {
@@ -162,15 +171,21 @@ class Megastore extends EventEmitter {
   }
 
   async _reseed () {
-    const storeList = await this._collect(this._storeIndex, CORESTORE_PREFIX)
+    const storeList = await this._collect(this._storeIndex, SEEDING_PREFIX)
     for (let { key, value } of storeList) {
-      if (value.seed === false) continue
+      key = key.slice(SEEDING_PREFIX.length)
+      console.error('***RESEEDING ROOT KEY:', key)
+      this._seed(key)
       try {
-        this._seed(value.discoveryKey)
+        var discoverableList = await this._collect(this._storeIndex, DISCOVERABLE_PREFIX + key)
       } catch (err) {
-        // If it could not be seeded, then it was indexed by name
-        console.error('RESEED ERR:', err)
+        console.error('ERROR FETCHING DISCOVERABLE:', discoverable)
         continue
+      }
+      for (let { key, value } of discoverableList) {
+        key = key.split('/')[2]
+        console.log('***RESEEDING DISCOVERABLE KEY HERE:', key)
+        this._seed(key)
       }
     }
   }
@@ -213,63 +228,136 @@ class Megastore extends EventEmitter {
     return wrappedStore
 
     function getCore (getter, coreOpts) {
-      if (coreOpts && coreOpts.key) {
-        const existing = self._cores.get(datEncoding.encode(coreOpts.key))
-        console.error('SELF._CORES:', self._cores, 'mainDiscoveryKeyString:', mainDiscoveryKeyString, 'keyString:', datEncoding.encode(coreOpts.key))
-        if (existing) {
-          var { core, refs } = existing
-          const dkey = datEncoding.encode(core.discoveryKey)
-          if (refs.indexOf(name) === -1) refs.push(name)
+      var core = getCachedAndSeed()
+      if (core) return core
 
-          if (!innerCores.get(dkey)) {
-            // TODO: Simplify this
-            if (!self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
-              self._seed(dkey)
-            }
-            if (coreOpts.discoverable) {
-              core.ready(err => {
-                if (err) return self.emit('error', err)
-                console.error('PUTTING HERE')
-                self._storeIndex.put(DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + dkey, {}, err => {
-                  console.error('AFTER PUT, err:', err)
-                  if (err) return self.emit('error', err)
-                })
-              })
-              innerCores.set(dkey, core)
-            }
-          }
-          console.error('RETURNING CORE')
-
-          return core
-        }
-      }
+      console.log('COREOPTS BEFORE GETTER:', coreOpts)
       core = getter(coreOpts)
-      core.ready(() => processCore(core, coreOpts))
+
+      const ready = core.ready.bind(core)
+      core.ready = thunky(cb => {
+        processCore(core, coreOpts)
+          .then(process.nextTick(ready, cb))
+          .catch(cb)
+      })
+      core.ready(err => {
+        if (err) self.emit('error', err)
+      })
+
       return core
+
+      function getCachedAndSeed () {
+        if (!coreOpts || !coreOpts.key) return null
+        const existing = self._cores.get(datEncoding.encode(coreOpts.key))
+        console.log('CORE EXISTING??', !!existing)
+        if (!existing) return null
+
+        const { core, refs } = existing
+        const dkey = datEncoding.encode(core.discoveryKey)
+        if (refs.indexOf(name) === -1) refs.push(name)
+
+        if (!innerCores.get(dkey) && !self.isSeeding(dkey) && (opts.seed !== false) && coreOpts.discoverable) {
+          seed(dkey)
+        }
+
+        return core
+      }
+
+      function seed (core, dkey) {
+        self._seed(core, dkey)
+        core.ready(err => {
+          if (err) return self.emit('error', err)
+          return self._storeIndex.put(DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + dkey, {}, err => {
+            if (err) return self.emit('error', err)
+            return null
+          })
+        })
+      }
     }
 
-    function processCore (core, coreOpts) {
+    async function processCore (core, coreOpts) {
       console.log('**** PROCESSING CORE:', core, 'OPTS:', coreOpts, 'MAIN DKEY:', mainDiscoveryKeyString)
-      const batch = []
       const encodedKey = datEncoding.encode(core.key)
       const encodedDiscoveryKey = datEncoding.encode(core.discoveryKey)
+      self._cores.set(encodedKey, { core, refs: [] })
 
-      const value = {
-        key: core.key,
-        seed: opts.seed !== false,
+      const coreValue = {
+        key: datEncoding.encode(core.key),
         sparse: opts.sparse !== false,
         writable: core.writable,
       }
 
-      batch.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value })
-      self._cores.set(encodedKey, { core, refs: [name] })
+      const indexRecords = await index()
+      const discoverableRecords = await discover()
+      await self._storeIndex.batch([ ...indexRecords, ...discoverableRecords ])
 
-      if (coreOpts.default || coreOpts.discoverable) {
-        const record = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+      const seedRecords = await seed()
+      await self._storeIndex.batch(seedRecords)
 
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + name, value: record })
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey + '/' + name, value: record })
-        batch.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: record })
+      updateCache()
+
+      if (self.networking) {
+        const discoverableKeys = await self._getDiscoverableKeys(mainDiscoveryKeyString)
+        self.networking.injectCore(core, discoverableKeys)
+      }
+
+      /*
+      console.log('INDEX RECORDS:', indexRecords)
+      console.log('SEED RECORDS:', seedRecords)
+      */
+      console.log('DISCOVERABLE RECORDS:', discoverableRecords)
+
+      return self._storeIndex.batch([...indexRecords, ...seedRecords, ...discoverableRecords])
+
+      async function index () {
+        const records = []
+        const corestoreValue = { name, opts: { ...opts, ...coreOpts }, key: encodedKey, discoveryKey: encodedDiscoveryKey }
+        records.push({ type: 'put', key: CORE_PREFIX + encodedDiscoveryKey, value: coreValue })
+
+        if (coreOpts.default) {
+          mainDiscoveryKeyString = encodedDiscoveryKey
+          mainKeyString = encodedKey
+          records.push({ type: 'put', key: CORESTORE_PREFIX + name, value: corestoreValue })
+          records.push({ type: 'put', key: CORESTORE_PREFIX + encodedDiscoveryKey, value: corestoreValue })
+        } else {
+          records.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+        }
+
+        return records
+      }
+
+      async function discover () {
+        const records = []
+
+        if (coreOpts.discoverable || coreOpts.default) {
+          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+          records.push({ type: 'put', key: DISCOVERABLE_PREFIX + encodedDiscoveryKey, value: mainDiscoveryKeyString })
+        }
+
+        return records
+      }
+
+      async function seed () {
+        const records = []
+        if (!coreOpts.default && !coreOpts.discoverable) return records
+
+        if (self.networking && opts.seed !== false) {
+          const seedRecord = await self._seed(encodedDiscoveryKey)
+          records.push(seedRecord)
+        }
+
+        return records
+      }
+
+      function updateCache () {
+        if (!coreOpts.default && !coreOpts.discoverable) return
+
+        if (coreOpts.default) {
+          mainDiscoveryKeyString = encodedDiscoveryKey
+          mainKeyString = encodedKey
+          self._corestores.set(encodedKey, wrappedStore)
+          self._corestores.set(name, wrappedStore)
+        }
 
         var dkeyMap = self._corestoresByDKey.get(encodedDiscoveryKey)
         if (!dkeyMap) {
@@ -278,33 +366,8 @@ class Megastore extends EventEmitter {
         }
         dkeyMap.set(name, wrappedStore)
 
-        if (coreOpts.default) {
-          mainDiscoveryKeyString = encodedDiscoveryKey
-          mainKeyString = encodedKey
-          self._corestores.set(encodedKey, wrappedStore)
-          self._corestores.set(name, wrappedStore)
-          batch.push({ type: 'put', key: CORESTORE_PREFIX + mainDiscoveryKeyString, value: record })
-        } else {
-          console.error('ADDING DISCOVERABLE WITH KEY:', encodedDiscoveryKey, 'TO:', mainDiscoveryKeyString)
-          batch.push({ type: 'put', key: DISCOVERABLE_PREFIX + mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
-        }
-        if (self.networking && opts.seed !== false) {
-          self._seed(encodedDiscoveryKey)
-        }
-      } else {
-        batch.push({ type: 'put', key: SUBCORE_PREFIX +  mainDiscoveryKeyString + '/' + encodedDiscoveryKey, value: {}})
+        innerCores.set(encodedDiscoveryKey, core)
       }
-
-      innerCores.set(encodedDiscoveryKey, core)
-
-      self._storeIndex.batch(batch, err => {
-        if (err) this.emit('error', err)
-        if (self.networking) {
-          self._getDiscoverableKeys(mainDiscoveryKeyString)
-            .then(keys => self.networking.injectCore(core, keys))
-            .catch(err => self.emit('error', err))
-        }
-      })
     }
 
     function close (cb) {
@@ -392,10 +455,6 @@ class Megastore extends EventEmitter {
     }
   }
 
-  async info (opts) {
-
-  }
-
   async seed (idx) {
     console.error('MEGASTORE CALLING SEED FOR IDX:', idx)
     if (idx instanceof Buffer) idx = datEncoding.encode(idx)
@@ -404,35 +463,28 @@ class Megastore extends EventEmitter {
     const dkey = datEncoding.decode(record.discoveryKey)
 
     if (!this.networking || this.isSeeding(record.discoveryKey)) return
-    record.opts.seed = true
+    const seedRecord = this._seed(record.discoveryKey)
 
-    await this._storeIndex.batch([
-      { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
-      { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
-    ])
-
-    this._seed(record.discoveryKey)
-
+    await this._storeIndex.batch([seedRecord])
     await this._seedDiscoverableSubfeeds(record.discoveryKey)
   }
 
   async unseed (idx) {
+    console.error('MEGASTORE CALLING UNSEED FOR IDX:', idx)
     if (idx instanceof Buffer) idx = datEncoding.encode(idx)
 
     const record = await this._storeIndex.get(CORESTORE_PREFIX + idx)
     const dkey = datEncoding.decode(record.discoveryKey)
 
     if (!this.networking || !this.isSeeding(record.discoveryKey)) return
-    record.opts.seed = false
+    const unseedRecord = this._unseed(record.discoveryKey)
 
-    await this._storeIndex.batch([
-      { type: 'put', key: CORESTORE_PREFIX + idx, value: record },
-      { type: 'put', key: CORESTORE_PREFIX + record.discoveryKey, value: record }
-    ])
-
-    this._unseed(record.discoveryKey)
-
+    await this._storeIndex.batch([unseedRecord])
     await this._unseedDiscoverableSubfeeds(record.discoveryKey)
+  }
+
+  async info (opts) {
+
   }
 
   async delete (opts) {
